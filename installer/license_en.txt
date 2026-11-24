@@ -1,0 +1,29 @@
+﻿ADOFAI PV Renderer - Terms of Use
+
+Last updated: 2026-11-24
+
+1. Purpose
+These terms govern installation and use of ADOFAI PV Renderer (the "Software").
+
+2. Unofficial tool
+The Software is an unofficial fan-made tool and is not affiliated with, sponsored by or endorsed by 'A Dance of Fire and Ice' or its developer. All rights to 'A Dance of Fire and Ice' belong to their respective owners.
+
+3. Prerequisites
+The Software requires a legitimately purchased copy of 'A Dance of Fire and Ice' installed via Steam. You must have the right to use the game and any level files you render.
+
+4. Permitted use
+(a) You may use the Software freely to create personal, non-commercial preview videos (PVs).
+(b) Clearing rights for third-party works (levels, music, artwork) that appear in rendered videos is solely your responsibility.
+(c) You must not reverse engineer or modify the Software to compromise the game's integrity or infringe the rights of others.
+
+5. How it works
+The Software injects an external module (a Doorstop/Harmony-based agent) into the game process to render offline. Game files in the installation folder are not modified, but game updates may break compatibility.
+
+6. Disclaimer
+The Software is provided "AS IS" without warranty of any kind. The author is not liable for any data loss, save/account issues or other damages arising from its use.
+
+7. Privacy
+The Software does not collect personal data or transmit it to external servers. All processing happens on your PC.
+
+8. Acceptance
+By selecting "I accept" and continuing, you agree to these terms. If you do not agree, cancel the installation.

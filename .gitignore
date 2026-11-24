@@ -1,0 +1,23 @@
+# build outputs
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+agent/build/
+
+# runtime data / user content (levels are other people's work - never commit)
+cache/
+output/
+level/
+*.zip
+*.adofai
+*.mp4
+*.mkv
+
+# misc
+.claude/
+.venv/
+*.log
+Thumbs.db
+assets/_backup/
