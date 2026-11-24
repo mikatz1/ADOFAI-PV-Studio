@@ -2,7 +2,7 @@
 ; Build via: installer\build_installer.ps1  (or ISCC.exe installer\setup.iss)
 
 #define MyAppName "ADOFAI PV Renderer"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.0.1"
 #define MyAppPublisher "ADOFAI PV Renderer"
 #define MyAppExeName "ADOFAI PV Renderer.exe"
 
@@ -34,7 +34,7 @@ SolidCompression=yes
 CloseApplications=force
 RestartApplications=no
 ShowLanguageDialog=auto
-VersionInfoVersion=2.0.0.0
+VersionInfoVersion=2.0.1.0
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription=ADOFAI Offline PV Renderer 설치 프로그램
 
@@ -91,6 +91,8 @@ Root: HKCU; Subkey: "Software\ADOFAI PV Renderer"; ValueType: string; ValueName:
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
+; In-app updates run the installer silently: relaunch the app afterwards
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallDelete]
 ; Clean up extracted runtime cache/agent DLLs on uninstall while preserving user rendered videos

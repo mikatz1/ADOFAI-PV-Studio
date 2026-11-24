@@ -766,7 +766,7 @@ class RenderRunner:
 
         os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
         st = os.stat(abs_lvl)
-        key_src = f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|v4"
+        key_src = f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|v5"
         h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
         out_mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip_jpg = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")

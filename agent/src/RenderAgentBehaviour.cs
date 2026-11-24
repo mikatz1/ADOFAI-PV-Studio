@@ -201,12 +201,33 @@ namespace AdofaiRenderAgent
                 {
                     UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, true);
                 }
+                if (Config != null && Config.previewMode)
+                    DisableMotionBlurForPreview();
                 if (_stage == Stage.Capturing && PlanetTailArc.Enabled)
                 {
                     try { PlanetTailArc.Tick(VirtualClock.Dt); }
                     catch (Exception ex) { AgentLog.Warn("PlanetTailArc: " + ex.Message); PlanetTailArc.Enabled = false; PlanetTailArc.Restore(); }
                 }
             }
+        }
+
+        private UnityStandardAssets.ImageEffects.CameraMotionBlur[] _motionBlurs = new UnityStandardAssets.ImageEffects.CameraMotionBlur[0];
+        private int _motionBlurScan = 0;
+
+        // Rough preview only: the level's MotionBlur filter smears the thumbnail frames, so keep it switched off.
+        private void DisableMotionBlurForPreview()
+        {
+            try
+            {
+                if ((_motionBlurScan++ % 30) == 0)
+                    _motionBlurs = UnityEngine.Object.FindObjectsOfType<UnityStandardAssets.ImageEffects.CameraMotionBlur>();
+                for (int i = 0; i < _motionBlurs.Length; i++)
+                {
+                    UnityStandardAssets.ImageEffects.CameraMotionBlur mb = _motionBlurs[i];
+                    if (mb != null && mb.enabled) mb.enabled = false;
+                }
+            }
+            catch { }
         }
 
         private void UpdateBoot()

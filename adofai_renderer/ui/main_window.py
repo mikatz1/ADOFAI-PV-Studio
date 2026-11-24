@@ -1416,7 +1416,7 @@ class MainWindow(QMainWindow):
         key_src = (
             f"{self.level_path}|{st.st_size}|{int(st.st_mtime)}|"
             f"{self.planet_state['red_color']}|{self.planet_state['red_opacity']:.2f}|"
-            f"{self.planet_state['blue_color']}|{self.planet_state['blue_opacity']:.2f}|v4"
+            f"{self.planet_state['blue_color']}|{self.planet_state['blue_opacity']:.2f}|v5"
         )
         h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
         mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
