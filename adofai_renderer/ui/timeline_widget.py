@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from ..i18n import tr
-from .theme import ACCENT_PLAYHEAD, format_timecode
+from .theme import format_timecode, get_palette
 
 
 class TimelineTrimWidget(QWidget):
@@ -55,6 +55,7 @@ class TimelineTrimWidget(QWidget):
         self._pan_origin_x: float = 0.0
         self._pan_origin_start: float = 0.0
         self._hover_target: Optional[str] = None
+        self._zoom_anim: Optional[QVariantAnimation] = None
 
     @property
     def duration(self) -> float:
@@ -107,6 +108,24 @@ class TimelineTrimWidget(QWidget):
     def set_audio_muted(self, muted: bool) -> None:
         self._audio_muted = bool(muted)
         self.update()
+
+    def animate_zoom(self, target_zoom: float, center_sec: Optional[float] = None, duration_ms: int = 140) -> None:
+        """Smoothly ease timeline zoom level for toolbar buttons & Fit action."""
+        target = max(1.0, min(8.0, float(target_zoom)))
+        if abs(target - self._zoom) < 0.01:
+            self.set_zoom(target, center_sec=center_sec)
+            return
+        if self._zoom_anim is not None:
+            self._zoom_anim.stop()
+        anchor = self._playhead if center_sec is None else center_sec
+        anim = QVariantAnimation(self)
+        anim.setDuration(duration_ms)
+        anim.setStartValue(float(self._zoom))
+        anim.setEndValue(float(target))
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(lambda v: self.set_zoom(float(v), center_sec=anchor))
+        self._zoom_anim = anim
+        anim.start()
 
     def set_zoom(self, zoom: float, center_sec: Optional[float] = None) -> None:
         new_z = max(1.0, min(8.0, float(zoom)))
@@ -210,9 +229,9 @@ class TimelineTrimWidget(QWidget):
         )
 
     def _v1_rect(self) -> QRectF:
-        tr = self._tracks_rect()
-        rem = tr.height() - self.FX_H - 4
-        return QRectF(tr.left(), tr.top() + 1, tr.width(), rem * 0.50)
+        trect = self._tracks_rect()
+        rem = trect.height() - self.FX_H - 4
+        return QRectF(trect.left(), trect.top() + 1, trect.width(), rem * 0.50)
 
     def _fx_rect(self) -> QRectF:
         v1 = self._v1_rect()
@@ -220,8 +239,8 @@ class TimelineTrimWidget(QWidget):
 
     def _a1_rect(self) -> QRectF:
         fx = self._fx_rect()
-        tr = self._tracks_rect()
-        return QRectF(fx.left(), fx.bottom() + 2, fx.width(), max(18.0, tr.bottom() - fx.bottom() - 2))
+        trect = self._tracks_rect()
+        return QRectF(fx.left(), fx.bottom() + 2, fx.width(), max(18.0, trect.bottom() - fx.bottom() - 2))
 
     def _btn_v1_vis(self) -> QRectF:
         v1 = self._v1_rect()
@@ -240,13 +259,13 @@ class TimelineTrimWidget(QWidget):
         return QRectF(self.GUTTER_W - 24, a1.center().y() - 8, 18, 16)
 
     def _sec_to_x(self, sec: float) -> float:
-        tr = self._tracks_rect()
+        trect = self._tracks_rect()
         ratio = (sec - self._view_start) / max(0.001, self._visible_span())
-        return tr.left() + ratio * tr.width()
+        return trect.left() + ratio * trect.width()
 
     def _x_to_sec(self, x: float) -> float:
-        tr = self._tracks_rect()
-        ratio = (x - tr.left()) / max(1.0, tr.width())
+        trect = self._tracks_rect()
+        ratio = (x - trect.left()) / max(1.0, trect.width())
         return max(0.0, min(self._duration, self._view_start + ratio * self._visible_span()))
 
     def _hit_test(self, x: float, y: float) -> str:
@@ -313,8 +332,8 @@ class TimelineTrimWidget(QWidget):
     def mouseMoveEvent(self, ev: QMouseEvent) -> None:
         pos = ev.position()
         if self._drag_mode == "pan":
-            tr = self._tracks_rect()
-            dx_sec = -((pos.x() - self._pan_origin_x) / max(1.0, tr.width())) * self._visible_span()
+            trect = self._tracks_rect()
+            dx_sec = -((pos.x() - self._pan_origin_x) / max(1.0, trect.width())) * self._visible_span()
             span = self._visible_span()
             self._view_start = max(0.0, min(self._duration - span, self._pan_origin_start + dx_sec))
             self.view_changed.emit()
@@ -361,13 +380,22 @@ class TimelineTrimWidget(QWidget):
         rect: QRectF,
         icon: str,
         active: bool,
-        active_bg: str = "#2d2d2d",
-        active_border: str = "#464646",
+        active_bg: str | None = None,
+        active_border: str | None = None,
     ) -> None:
-        p.setPen(QPen(QColor(active_border if active else "#2a2a2a"), 1))
-        p.setBrush(QColor(active_bg if active else "#171717"))
-        p.drawRect(rect)
-        fg = QColor("#dadada" if active else "#585858")
+        pal = get_palette()
+        abg = active_bg or pal.tl_btn_on_bg
+        abdr = active_border or pal.tl_btn_on_border
+        p.setPen(QPen(QColor(abdr if active else pal.tl_btn_off_border), 1))
+        p.setBrush(QColor(abg if active else pal.tl_btn_off_bg))
+        if pal.is_light:
+            p.drawRoundedRect(rect, 3.0, 3.0)
+        else:
+            p.drawRect(rect)
+        if icon == "mute" and active and pal.is_light:
+            fg = QColor(pal.accent_danger)
+        else:
+            fg = QColor(pal.tl_btn_fg_on if active else pal.tl_btn_fg_off)
         cx, cy = rect.center().x(), rect.center().y()
 
         if icon == "eye":
@@ -405,61 +433,78 @@ class TimelineTrimWidget(QWidget):
                 p.drawLine(QPointF(wx, cy - hh), QPointF(wx, cy + hh))
 
     def paintEvent(self, _ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        tr = self._tracks_rect()
+        trect = self._tracks_rect()
         v1 = self._v1_rect()
         fx = self._fx_rect()
         a1 = self._a1_rect()
         span = self._visible_span()
         v_end = self._view_start + span
 
-        p.fillRect(self.rect(), QColor("#151515"))
+        p.fillRect(self.rect(), QColor(pal.tl_bg))
 
         # Left track header gutter
-        p.fillRect(QRectF(0, 0, self.GUTTER_W - 1, self.height()), QColor("#1f1f1f"))
-        p.setPen(QPen(QColor("#2c2c2c"), 1))
+        p.fillRect(QRectF(0, 0, self.GUTTER_W - 1, self.height()), QColor(pal.tl_gutter_bg))
+        p.setPen(QPen(QColor(pal.tl_gutter_border), 1))
         p.drawLine(QPointF(self.GUTTER_W - 1, 0), QPointF(self.GUTTER_W - 1, self.height()))
         p.drawLine(QPointF(0, self.RULER_H), QPointF(self.width(), self.RULER_H))
 
         # Horizontal lane separators in gutter
-        p.setPen(QPen(QColor("#292929"), 1))
+        p.setPen(QPen(QColor(pal.tl_gutter_sep), 1))
         p.drawLine(QPointF(0, v1.bottom() + 1), QPointF(self.GUTTER_W - 1, v1.bottom() + 1))
         p.drawLine(QPointF(0, fx.bottom() + 1), QPointF(self.GUTTER_W - 1, fx.bottom() + 1))
 
         mono8 = QFont("Cascadia Mono", 8)
+        if pal.is_light:
+            mono8.setBold(True)
         ui8 = QFont("Segoe UI", 8)
+        if pal.is_light:
+            ui8.setWeight(QFont.DemiBold)
         p.setFont(mono8)
-        p.setPen(QColor("#7e7e7e"))
-        p.drawText(QRectF(8, 0, self.GUTTER_W - 12, self.RULER_H), Qt.AlignLeft | Qt.AlignVCenter, f"BPM {int(round(self._bpm))}")
+        if pal.is_light:
+            # Subtle pastel pill tag for BPM in light mode
+            pill = QRectF(6, 3, self.GUTTER_W - 14, self.RULER_H - 6)
+            p.setPen(QPen(QColor("#C6DEF6"), 1))
+            p.setBrush(QColor("#EAF4FF"))
+            p.drawRoundedRect(pill, 4.0, 4.0)
+            p.setPen(QColor(pal.tl_bpm_text))
+            p.drawText(pill, Qt.AlignCenter, f"BPM {int(round(self._bpm))}")
+        else:
+            p.setPen(QColor(pal.tl_bpm_text))
+            p.drawText(QRectF(8, 0, self.GUTTER_W - 12, self.RULER_H), Qt.AlignLeft | Qt.AlignVCenter, f"BPM {int(round(self._bpm))}")
 
         # Track 1: Video
         p.setFont(ui8)
-        p.setPen(QColor("#c8c8c8"))
+        p.setPen(QColor(pal.tl_track_text))
         p.drawText(QRectF(8, v1.top(), 72, v1.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_v1"))
         self._draw_icon_toggle(p, self._btn_v1_vis(), "eye", self._show_filmstrip)
 
         # Track 2: Chart FX events
-        p.setFont(QFont("Segoe UI", 7))
-        p.setPen(QColor("#a0a0a0"))
+        fx_font = QFont("Segoe UI", 7)
+        if pal.is_light:
+            fx_font.setWeight(QFont.DemiBold)
+        p.setFont(fx_font)
+        p.setPen(QColor(pal.tl_track_sub))
         p.drawText(QRectF(8, fx.top(), 72, fx.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_fx"))
         self._draw_icon_toggle(p, self._btn_fx_vis(), "bars", self._show_fx)
 
         # Track 3: Audio
         p.setFont(ui8)
-        p.setPen(QColor("#c8c8c8"))
+        p.setPen(QColor(pal.tl_track_text))
         p.drawText(QRectF(8, a1.top(), 58, a1.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_a1"))
-        self._draw_icon_toggle(p, self._btn_a1_mute(), "mute", self._audio_muted, active_bg="#662c30", active_border="#803c42")
+        self._draw_icon_toggle(p, self._btn_a1_mute(), "mute", self._audio_muted, active_bg=pal.tl_mute_on_bg, active_border=pal.tl_mute_on_border)
         self._draw_icon_toggle(p, self._btn_a1_wave(), "wave", self._show_waveform)
 
         # Crisp Ruler ticks (major + medium + minor subdivisions aligned to timestamps)
         p.save()
         p.setRenderHint(QPainter.Antialiasing, False)
-        p.setClipRect(QRectF(tr.left(), 0, tr.width(), self.RULER_H))
-        p.fillRect(QRectF(tr.left(), 0, tr.width(), self.RULER_H), QColor("#1b1b1b"))
-        p.setFont(mono8)
-        approx_ticks = max(4, int(tr.width() // 92))
+        p.setClipRect(QRectF(trect.left(), 0, trect.width(), self.RULER_H))
+        p.fillRect(QRectF(trect.left(), 0, trect.width(), self.RULER_H), QColor(pal.tl_ruler_bg))
+        p.setFont(QFont("Cascadia Mono", 8))
+        approx_ticks = max(4, int(trect.width() // 92))
         raw_step = span / approx_ticks
         step = 10.0
         for cand in (0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0):
@@ -475,36 +520,36 @@ class TimelineTrimWidget(QWidget):
         while mt <= v_end + minor_step * 0.5 and guard < 600:
             guard += 1
             mx = self._sec_to_x(mt)
-            if mx >= tr.left() - 2 and mx <= tr.right() + 2:
+            if mx >= trect.left() - 2 and mx <= trect.right() + 2:
                 idx_major = round(mt / step)
                 is_major = abs(mt - idx_major * step) < (minor_step * 0.15)
                 if is_major:
-                    p.setPen(QPen(QColor("#8a8a8a"), 1))
+                    p.setPen(QPen(QColor(pal.tl_ruler_major), 1))
                     p.drawLine(int(round(mx)), self.RULER_H - 9, int(round(mx)), self.RULER_H)
-                    p.setPen(QColor("#a8a8a8"))
+                    p.setPen(QColor(pal.tl_ruler_text))
                     p.drawText(QRectF(mx + 3, 1, 56, self.RULER_H - 9), Qt.AlignLeft | Qt.AlignVCenter, format_timecode(mt))
                 else:
                     is_half = (sub_div % 2 == 0) and (abs((mt % step) - step * 0.5) < minor_step * 0.2)
                     if is_half:
-                        p.setPen(QPen(QColor("#626262"), 1))
+                        p.setPen(QPen(QColor(pal.tl_ruler_half), 1))
                         p.drawLine(int(round(mx)), self.RULER_H - 6, int(round(mx)), self.RULER_H)
                     else:
-                        p.setPen(QPen(QColor("#484848"), 1))
+                        p.setPen(QPen(QColor(pal.tl_ruler_minor), 1))
                         p.drawLine(int(round(mx)), self.RULER_H - 4, int(round(mx)), self.RULER_H)
             mt += minor_step
         p.restore()
 
-        # Neutral studio track wells (no tinted lane backgrounds)
-        p.fillRect(v1, QColor("#111111"))
-        p.fillRect(fx, QColor("#141414"))
-        p.fillRect(a1, QColor("#111111"))
-        p.setPen(QPen(QColor("#282828"), 1))
+        # Track wells
+        p.fillRect(v1, QColor(pal.tl_well_v1))
+        p.fillRect(fx, QColor(pal.tl_well_fx))
+        p.fillRect(a1, QColor(pal.tl_well_a1))
+        p.setPen(QPen(QColor(pal.tl_well_border), 1))
         p.drawRect(v1)
         p.drawRect(fx)
         p.drawRect(a1)
 
         p.save()
-        p.setClipRect(tr)
+        p.setClipRect(trect)
 
         full_x0 = self._sec_to_x(0.0)
         full_x1 = self._sec_to_x(self._duration)
@@ -513,42 +558,42 @@ class TimelineTrimWidget(QWidget):
         # Video Filmstrip
         if self._show_filmstrip and self._filmstrip is not None and not self._filmstrip.isNull():
             p.drawPixmap(QRectF(full_x0, v1.top() + 1, full_w, v1.height() - 2).toRect(), self._filmstrip)
-            p.fillRect(v1, QColor(0, 0, 0, 38))
+            p.fillRect(v1, QColor(0, 0, 0, 20 if pal.is_light else 38))
         else:
-            p.fillRect(QRectF(full_x0, v1.top() + 3, full_w, v1.height() - 6), QColor("#1c2228"))
+            p.fillRect(QRectF(full_x0, v1.top() + 3, full_w, v1.height() - 6), QColor(pal.tl_v1_clip_bg))
 
-        # Subtle muted NLE markers for ADOFAI chart events (restrained studio ticks, not bright barcode)
+        # Subtle NLE markers for ADOFAI chart events
         if self._show_fx and self._event_markers:
             p.save()
             p.setRenderHint(QPainter.Antialiasing, False)
             col_map = {
-                "filter": QColor("#947c58"),
-                "camera": QColor("#5c7b94"),
-                "speed": QColor("#946060"),
+                "filter": QColor(pal.tl_fx_filter),
+                "camera": QColor(pal.tl_fx_camera),
+                "speed": QColor(pal.tl_fx_speed),
             }
             for ratio, kind in self._event_markers:
                 ex = int(round(self._sec_to_x(ratio * self._duration)))
-                if ex < tr.left() or ex > tr.right():
+                if ex < trect.left() or ex > trect.right():
                     continue
-                p.setPen(QPen(col_map.get(kind, QColor("#6e6e6e")), 1))
+                p.setPen(QPen(col_map.get(kind, QColor(pal.text_muted)), 1))
                 p.drawLine(ex, int(fx.top() + 3), ex, int(fx.bottom() - 3))
             p.restore()
 
-        # Continuous dense 1px studio audio waveform (desaturated sage-teal envelope + centerline)
+        # Continuous dense 1px studio audio waveform
         p.save()
         p.setRenderHint(QPainter.Antialiasing, False)
         mid_y = int(round(a1.center().y()))
-        p.setPen(QPen(QColor("#232927"), 1))
-        p.drawLine(int(tr.left()), mid_y, int(tr.right()), mid_y)
+        p.setPen(QPen(QColor(pal.tl_wave_center), 1))
+        p.drawLine(int(trect.left()), mid_y, int(trect.right()), mid_y)
         if self._show_waveform and self._waveform:
             n = len(self._waveform)
             max_h = a1.height() * 0.44
             x_in_px = self._sec_to_x(self._trim_in)
             x_out_px = self._sec_to_x(self._trim_out)
-            px_start = max(int(tr.left()), int(full_x0))
-            px_end = min(int(tr.right()), int(full_x1))
-            pen_active = QPen(QColor("#628b79"), 1)
-            pen_muted = QPen(QColor("#38423e"), 1)
+            px_start = max(int(trect.left()), int(full_x0))
+            px_end = min(int(trect.right()), int(full_x1))
+            pen_active = QPen(QColor(pal.tl_wave_active), 1)
+            pen_muted = QPen(QColor(pal.tl_wave_muted), 1)
             for px_x in range(px_start, px_end + 1):
                 rel0 = (px_x - full_x0) / max(1.0, full_w)
                 rel1 = (px_x + 1 - full_x0) / max(1.0, full_w)
@@ -564,40 +609,42 @@ class TimelineTrimWidget(QWidget):
         # Out-of-trim shaded masks
         x_in = self._sec_to_x(self._trim_in)
         x_out = self._sec_to_x(self._trim_out)
-        if x_in > tr.left():
-            p.fillRect(QRectF(tr.left(), tr.top(), min(tr.right(), x_in) - tr.left(), tr.height()), QColor(0, 0, 0, 145))
-        if x_out < tr.right():
-            rx0 = max(tr.left(), x_out)
-            p.fillRect(QRectF(rx0, tr.top(), tr.right() - rx0, tr.height()), QColor(0, 0, 0, 145))
+        mask_col = QColor(pal.tl_trim_mask)
+        mask_col.setAlpha(pal.tl_trim_mask_alpha)
+        if x_in > trect.left():
+            p.fillRect(QRectF(trect.left(), trect.top(), min(trect.right(), x_in) - trect.left(), trect.height()), mask_col)
+        if x_out < trect.right():
+            rx0 = max(trect.left(), x_out)
+            p.fillRect(QRectF(rx0, trect.top(), trect.right() - rx0, trect.height()), mask_col)
 
         # Selection box + In/Out handles
-        sel_col = QColor("#4d85ba") if self._is_trimmed else QColor("#4a4a4a")
+        sel_col = QColor(pal.tl_sel_trimmed) if self._is_trimmed else QColor(pal.tl_sel_full)
         p.setPen(QPen(sel_col, 1.5))
         p.setBrush(Qt.NoBrush)
-        p.drawRect(QRectF(x_in, tr.top() + 1, max(2.0, x_out - x_in), tr.height() - 2))
+        p.drawRect(QRectF(x_in, trect.top() + 1, max(2.0, x_out - x_in), trect.height() - 2))
 
         in_hl = (self._hover_target == "in" or self._drag_mode == "in")
         out_hl = (self._hover_target == "out" or self._drag_mode == "out")
 
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#7cb5eb") if in_hl else sel_col)
-        p.drawRect(QRectF(x_in, tr.top() + 1, 6, tr.height() - 2))
-        p.setPen(QPen(QColor("#111111"), 1.2))
-        p.drawLine(QPointF(x_in + 3, tr.center().y() - 10), QPointF(x_in + 3, tr.center().y() + 10))
+        p.setBrush(QColor(pal.tl_handle_hover) if in_hl else sel_col)
+        p.drawRect(QRectF(x_in, trect.top() + 1, 6, trect.height() - 2))
+        p.setPen(QPen(QColor(pal.tl_handle_grip), 1.2))
+        p.drawLine(QPointF(x_in + 3, trect.center().y() - 10), QPointF(x_in + 3, trect.center().y() + 10))
 
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#7cb5eb") if out_hl else sel_col)
-        p.drawRect(QRectF(x_out - 6, tr.top() + 1, 6, tr.height() - 2))
-        p.setPen(QPen(QColor("#111111"), 1.2))
-        p.drawLine(QPointF(x_out - 3, tr.center().y() - 10), QPointF(x_out - 3, tr.center().y() + 10))
+        p.setBrush(QColor(pal.tl_handle_hover) if out_hl else sel_col)
+        p.drawRect(QRectF(x_out - 6, trect.top() + 1, 6, trect.height() - 2))
+        p.setPen(QPen(QColor(pal.tl_handle_grip), 1.2))
+        p.drawLine(QPointF(x_out - 3, trect.center().y() - 10), QPointF(x_out - 3, trect.center().y() + 10))
 
         p.restore()
 
         # Playhead
         px = self._sec_to_x(self._playhead)
-        if px >= tr.left() - 2 and px <= tr.right() + 2:
-            p.setPen(QPen(QColor(ACCENT_PLAYHEAD), 1.5))
-            p.drawLine(QPointF(px, self.RULER_H - 2), QPointF(px, tr.bottom()))
+        if px >= trect.left() - 2 and px <= trect.right() + 2:
+            p.setPen(QPen(QColor(pal.accent_playhead), 1.6))
+            p.drawLine(QPointF(px, self.RULER_H - 2), QPointF(px, trect.bottom()))
 
             cap = QPainterPath()
             cap.moveTo(px - 5, self.RULER_H - 8)
@@ -606,8 +653,8 @@ class TimelineTrimWidget(QWidget):
             cap.lineTo(px, self.RULER_H + 3)
             cap.lineTo(px - 5, self.RULER_H - 2)
             cap.closeSubpath()
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(ACCENT_PLAYHEAD))
+            p.setPen(QPen(QColor("#FFFFFF"), 0.8) if pal.is_light else Qt.NoPen)
+            p.setBrush(QColor(pal.accent_playhead))
             p.drawPath(cap)
 
         p.end()

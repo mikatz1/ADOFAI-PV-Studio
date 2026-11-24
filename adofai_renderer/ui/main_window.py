@@ -9,8 +9,8 @@ import subprocess
 from typing import List, Optional
 
 import cv2
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, QUrl, QVariantAnimation, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +51,9 @@ from ..updater import UpdateInfo, check_for_update, download_installer, launch_i
 from ..version import __version__
 from ..preloader import PreloadResult
 from ..render_runner import (
+    DEFAULT_PROXY_FPS,
+    DEFAULT_PROXY_HEIGHT,
+    DEFAULT_PROXY_WIDTH,
     PREVIEW_CACHE_DIR,
     PROJECT_ROOT,
     PreviewResult,
@@ -58,19 +61,32 @@ from ..render_runner import (
     RenderResult,
     RenderRunner,
     RenderSettings,
+    compute_preview_cache_key,
     estimate_output_size_mb,
     estimate_render_time_sec,
+    load_proxy_settings,
+    save_proxy_settings,
 )
-from .dialogs import ExportSettingsDialog, PlanetSettingsDialog, RES_PRESETS, RenderConfirmDialog, SequenceSettingsDialog
+from .dialogs import (
+    ExportSettingsDialog,
+    PlanetSettingsDialog,
+    ProxySettingsDialog,
+    RES_PRESETS,
+    RenderConfirmDialog,
+    SequenceSettingsDialog,
+)
 from .render_card import RenderCardDialog
 from .theme import (
-    ACCENT_WARM,
-    BG_CANVAS,
-    TEXT_SECONDARY,
+    SUPPORTED_THEMES,
+    build_studio_qss,
+    fade_in_widget,
     format_duration_korean,
     format_timecode,
     format_timecode_ms,
+    get_palette,
+    get_theme,
     make_icon,
+    set_theme,
 )
 from .timeline_widget import TimelineTrimWidget
 
@@ -126,12 +142,13 @@ class GripSplitterHandle(QSplitterHandle):
     """Native Qt splitter handle with subtle centered 3-dot resize grip."""
 
     def paintEvent(self, ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#161616"))
+        p.fillRect(self.rect(), QColor(pal.splitter_bg))
         cx = self.width() // 2
         cy = self.height() // 2
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#4c4c4c"))
+        p.setBrush(QColor(pal.splitter_dot))
         if self.orientation() == Qt.Horizontal:
             for dy in (-6, 0, 6):
                 p.drawRect(cx - 1, cy + dy - 1, 2, 2)
@@ -193,6 +210,9 @@ class PreviewBuildWorker(QThread):
         blue_opacity: float,
         gpu_limit: int,
         force_rebuild: bool = False,
+        proxy_width: int = DEFAULT_PROXY_WIDTH,
+        proxy_height: int = DEFAULT_PROXY_HEIGHT,
+        proxy_fps: int = DEFAULT_PROXY_FPS,
     ) -> None:
         super().__init__()
         self.runner = runner
@@ -204,6 +224,9 @@ class PreviewBuildWorker(QThread):
         self.blue_opacity = blue_opacity
         self.gpu_limit = gpu_limit
         self.force_rebuild = force_rebuild
+        self.proxy_width = proxy_width
+        self.proxy_height = proxy_height
+        self.proxy_fps = proxy_fps
 
     def run(self) -> None:
         res = self.runner.generate_rough_preview(
@@ -216,12 +239,15 @@ class PreviewBuildWorker(QThread):
             gpu_limit_percent=self.gpu_limit,
             force_rebuild=self.force_rebuild,
             progress_cb=lambda p: self.progress.emit(p),
+            proxy_width=self.proxy_width,
+            proxy_height=self.proxy_height,
+            proxy_fps=self.proxy_fps,
         )
         self.done.emit(res)
 
 
 class StereoDbMeter(QWidget):
-    """Calibrated vertical stereo (L / R) broadcast VU meter with dB scale and green/yellow/red peak headroom."""
+    """Calibrated vertical stereo (L / R) broadcast VU meter with smooth ballistic decay and peak headroom."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -230,10 +256,26 @@ class StereoDbMeter(QWidget):
         self._r: float = 0.0
         self._peak_l: float = 0.0
         self._peak_r: float = 0.0
+        self._decay_timer = QTimer(self)
+        self._decay_timer.setInterval(33)
+        self._decay_timer.timeout.connect(self._tick_decay)
 
     def set_levels(self, left: float, right: float, clear_peak: bool = False) -> None:
-        self._l = max(0.0, min(1.0, float(left)))
-        self._r = max(0.0, min(1.0, float(right)))
+        nl = max(0.0, min(1.0, float(left)))
+        nr = max(0.0, min(1.0, float(right)))
+        if clear_peak and nl <= 0.001 and nr <= 0.001:
+            # Smooth ballistic release when stopping playback instead of jarring snap to 0
+            if self._l > 0.01 or self._r > 0.01 or self._peak_l > 0.01 or self._peak_r > 0.01:
+                if not self._decay_timer.isActive():
+                    self._decay_timer.start()
+            else:
+                self._l = self._r = self._peak_l = self._peak_r = 0.0
+                self._decay_timer.stop()
+                self.update()
+            return
+        self._decay_timer.stop()
+        self._l = nl
+        self._r = nr
         if clear_peak:
             self._peak_l = self._l
             self._peak_r = self._r
@@ -242,10 +284,21 @@ class StereoDbMeter(QWidget):
             self._peak_r = max(self._r, self._peak_r * 0.94)
         self.update()
 
+    def _tick_decay(self) -> None:
+        self._l *= 0.72
+        self._r *= 0.72
+        self._peak_l *= 0.78
+        self._peak_r *= 0.78
+        if max(self._l, self._r, self._peak_l, self._peak_r) < 0.015:
+            self._l = self._r = self._peak_l = self._peak_r = 0.0
+            self._decay_timer.stop()
+        self.update()
+
     def paintEvent(self, _ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#141414"))
-        p.setPen(QPen(QColor("#242424"), 1))
+        p.fillRect(self.rect(), QColor(pal.vu_bg))
+        p.setPen(QPen(QColor(pal.vu_border), 1))
         p.drawLine(0, 0, 0, self.height())
 
         top_y = 10
@@ -254,8 +307,8 @@ class StereoDbMeter(QWidget):
 
         # Stereo L / R bar area (left 13px) + dB ticks/labels (right 22px)
         bar_rect = QRectF(4, top_y, 13, meter_h)
-        p.fillRect(bar_rect, QColor("#0c0c0c"))
-        p.setPen(QPen(QColor("#2b2b2b"), 1))
+        p.fillRect(bar_rect, QColor(pal.vu_well_bg))
+        p.setPen(QPen(QColor(pal.vu_well_border), 1))
         p.drawRect(bar_rect)
 
         segs = 32
@@ -271,33 +324,75 @@ class StereoDbMeter(QWidget):
                 frac = s / float(segs)
                 if s < lit or (pk > 0.03 and s == pk_seg):
                     if frac >= 0.88:
-                        col = QColor("#d94c4c")
+                        col = QColor(pal.vu_high_on)
                     elif frac >= 0.68:
-                        col = QColor("#d4ad42")
+                        col = QColor(pal.vu_mid_on)
                     else:
-                        col = QColor("#4aa867")
+                        col = QColor(pal.vu_low_on)
                 else:
                     if frac >= 0.88:
-                        col = QColor("#2a1a1a")
+                        col = QColor(pal.vu_high_off)
                     elif frac >= 0.68:
-                        col = QColor("#282419")
+                        col = QColor(pal.vu_mid_off)
                     else:
-                        col = QColor("#19231c")
+                        col = QColor(pal.vu_low_off)
                 p.fillRect(QRectF(bx, sy, ch_w, seg_h), col)
 
         # dB scale markings on right side with unambiguous spacing so tick never reads as a minus sign
         p.setFont(QFont("Cascadia Mono", 6))
         for db_label, frac in (("0", 0.98), ("-6", 0.84), ("-12", 0.68), ("-24", 0.44), ("-48", 0.14)):
             yy = bar_rect.bottom() - frac * meter_h
-            p.setPen(QPen(QColor("#3e3e3e"), 1))
+            p.setPen(QPen(QColor(pal.vu_tick), 1))
             p.drawLine(QPointF(bar_rect.right() + 1, yy), QPointF(bar_rect.right() + 2, yy))
-            p.setPen(QColor("#787878"))
+            p.setPen(QColor(pal.vu_label))
             p.drawText(QRectF(bar_rect.right() + 6, yy - 5, 20, 10), Qt.AlignRight | Qt.AlignVCenter, db_label)
 
         # L / R footer label
         p.setFont(QFont("Cascadia Mono", 7))
-        p.setPen(QColor("#787878"))
+        p.setPen(QColor(pal.vu_label))
         p.drawText(QRectF(2, bot_y + 2, 18, 13), Qt.AlignCenter, "L R")
+        p.end()
+
+
+class _ViewportOverlayCard(QFrame):
+    """Viewport overlay dialog card with pastel-blue/pink skewed accent header in Light Mode."""
+
+    def paintEvent(self, _ev) -> None:
+        pal = get_palette()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if pal.is_light:
+            p.setPen(QPen(QColor(pal.overlay_border), 1.0))
+            p.setBrush(QColor(255, 255, 255, 246))
+            p.drawRoundedRect(r, 8.0, 8.0)
+
+            # Top pastel blue -> pastel pink bar clipped to rounded card
+            clip = QPainterPath()
+            clip.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 7.5, 7.5)
+            p.setClipPath(clip)
+
+            # Subtle skewed geometric stripes in upper-right corner
+            for col_hex, x0, w in (("#EAF5FF", r.right() - 78, 16), ("#FFEBF4", r.right() - 54, 11)):
+                poly = QPainterPath()
+                poly.moveTo(x0, r.top())
+                poly.lineTo(x0 + w, r.top())
+                poly.lineTo(x0 + w - 22, r.top() + 56)
+                poly.lineTo(x0 - 22, r.top() + 56)
+                poly.closeSubpath()
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(col_hex))
+                p.drawPath(poly)
+
+            grad = QLinearGradient(r.left(), r.top(), r.right(), r.top())
+            grad.setColorAt(0.0, QColor("#58BCFF"))
+            grad.setColorAt(0.65, QColor("#44A2FF"))
+            grad.setColorAt(1.0, QColor("#F58CBE"))
+            p.fillRect(QRectF(r.left(), r.top(), r.width(), 3.5), grad)
+        else:
+            p.setPen(QPen(QColor(pal.overlay_border), 1.0))
+            p.setBrush(QColor(24, 24, 24, 232))
+            p.drawRoundedRect(r, 3.0, 3.0)
         p.end()
 
 
@@ -323,39 +418,31 @@ class PreviewViewportWidget(QWidget):
         lay.setAlignment(Qt.AlignCenter)
         lay.setContentsMargins(16, 16, 16, 16)
 
-        self.overlay_card = QFrame()
-        self.overlay_card.setStyleSheet(
-            "QFrame { background-color: rgba(24, 24, 24, 232); border: 1px solid #353535; border-radius: 3px; }"
-        )
+        self.overlay_card = _ViewportOverlayCard()
+        self.overlay_card.setObjectName("viewportOverlayCard")
+        self.overlay_card.setStyleSheet("QFrame#viewportOverlayCard { background: transparent; border: none; }")
         oc_lay = QVBoxLayout(self.overlay_card)
-        oc_lay.setContentsMargins(20, 16, 20, 16)
+        oc_lay.setContentsMargins(22, 18, 22, 16)
         oc_lay.setSpacing(8)
 
         self.lbl_ov_title = QLabel(tr("vp.empty_title"))
         self.lbl_ov_title.setAlignment(Qt.AlignCenter)
-        self.lbl_ov_title.setStyleSheet("color: #e2e2e2; font-size: 13px; font-weight: 600; background: transparent; border: none;")
         self.lbl_ov_sub = QLabel(tr("vp.empty_sub"))
         self.lbl_ov_sub.setAlignment(Qt.AlignCenter)
-        self.lbl_ov_sub.setStyleSheet("color: #909090; font-size: 11px; background: transparent; border: none;")
 
         self.ov_progress = QProgressBar()
         self.ov_progress.setRange(0, 1000)
         self.ov_progress.setFixedSize(250, 5)
         self.ov_progress.setTextVisible(False)
-        self.ov_progress.setStyleSheet(
-            f"QProgressBar {{ background: #141414; border: none; border-radius: 2px; }}"
-            f"QProgressBar::chunk {{ background: {ACCENT_WARM}; border-radius: 2px; }}"
-        )
         self.ov_progress.hide()
 
         btn_row = QHBoxLayout()
         btn_row.setAlignment(Qt.AlignCenter)
         btn_row.setSpacing(8)
         self.btn_ov_open = QPushButton(tr("vp.btn_open"))
-        self.btn_ov_open.clicked.connect(self.request_open_level.emit)
+        self.btn_ov_open.clicked.connect(lambda _=False: self.request_open_level.emit())
         self.btn_ov_preview = QPushButton(tr("vp.btn_preview"))
-        self.btn_ov_preview.setIcon(make_icon("film", "#dcdcdc", 14))
-        self.btn_ov_preview.clicked.connect(self.request_generate_preview.emit)
+        self.btn_ov_preview.clicked.connect(lambda _=False: self.request_generate_preview.emit())
         self.btn_ov_preview.hide()
         btn_row.addWidget(self.btn_ov_open)
         btn_row.addWidget(self.btn_ov_preview)
@@ -365,6 +452,26 @@ class PreviewViewportWidget(QWidget):
         oc_lay.addWidget(self.ov_progress, 0, Qt.AlignCenter)
         oc_lay.addLayout(btn_row)
         lay.addWidget(self.overlay_card)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        pal = get_palette()
+        self.lbl_ov_title.setStyleSheet(
+            f"color: {pal.overlay_title}; font-size: 13px; font-weight: 700; background: transparent; border: none;"
+        )
+        self.lbl_ov_sub.setStyleSheet(
+            f"color: {pal.overlay_sub}; font-size: 11px; background: transparent; border: none;"
+        )
+        self.ov_progress.setStyleSheet(
+            f"QProgressBar {{ background: {pal.prog_bg}; border: none; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {pal.prog_chunk_start}, stop:1 {pal.prog_chunk_end}); border-radius: 2px; }}"
+        )
+        self.btn_ov_open.setObjectName("primaryBtn" if pal.is_light else "")
+        self.btn_ov_open.style().unpolish(self.btn_ov_open)
+        self.btn_ov_open.style().polish(self.btn_ov_open)
+        self.btn_ov_preview.setIcon(make_icon("film", pal.icon_color, 14))
+        self.overlay_card.update()
+        self.update()
 
     def retranslate_ui(self) -> None:
         self.btn_ov_open.setText(tr("vp.btn_open"))
@@ -394,6 +501,7 @@ class PreviewViewportWidget(QWidget):
         self.btn_ov_preview.setEnabled(True)
         self.btn_ov_preview.show()
         self.overlay_card.show()
+        fade_in_widget(self.overlay_card, start=0.25, duration_ms=160)
         self.update()
 
     def set_generating_state(self, active: bool, status_text: str = "", pct: float = 0.0) -> None:
@@ -453,9 +561,19 @@ class PreviewViewportWidget(QWidget):
         self.update()
 
     def paintEvent(self, _ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        p.fillRect(self.rect(), QColor(BG_CANVAS))
+        p.fillRect(self.rect(), QColor(pal.bg_canvas))
+
+        if pal.is_light:
+            # Subtle blueprint micro dot-grid on light surround
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(pal.vp_grid_dot))
+            step = 18
+            for yy in range(9, self.height(), step):
+                for xx in range(9, self.width(), step):
+                    p.drawRect(xx, yy, 2, 2)
 
         avail = self.rect().adjusted(8, 8, -8, -8)
         target_ratio = 16.0 / 9.0
@@ -469,18 +587,73 @@ class PreviewViewportWidget(QWidget):
             dh = w / target_ratio
         stage = QRectF(avail.center().x() - dw / 2.0, avail.center().y() - dh / 2.0, dw, dh)
 
-        p.fillRect(stage, QColor("#050505"))
-        if self._current_frame is not None and not self._current_frame.isNull():
-            p.drawPixmap(stage.toRect(), self._current_frame)
+        if pal.is_light:
+            # Soft offset drop frame behind 16:9 stage
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(152, 184, 218, 65))
+            p.drawRoundedRect(stage.translated(0, 2), 6.0, 6.0)
 
-        p.setPen(QPen(QColor("#282828"), 1))
+        has_frame = self._current_frame is not None and not self._current_frame.isNull()
+        if pal.is_light and not has_frame:
+            # Bright airy pastel light viewport stage when awaiting level/proxy
+            p.save()
+            p.setClipRect(stage)
+            st_grad = QLinearGradient(stage.left(), stage.top(), stage.right(), stage.bottom())
+            st_grad.setColorAt(0.0, QColor("#E0EEFC"))
+            st_grad.setColorAt(0.55, QColor("#F1F7FE"))
+            st_grad.setColorAt(1.0, QColor("#FDEFF7"))
+            p.fillRect(stage, st_grad)
+
+            # Subtle diagonal pastel accent stripes in far corners
+            p.setPen(Qt.NoPen)
+            for col_hex, x0, w in (
+                ("#D2E8FD", stage.right() - 165, 36),
+                ("#FCE1EF", stage.right() - 115, 22),
+                ("#DCEEFD", stage.left() + 40, 26),
+            ):
+                poly = QPainterPath()
+                poly.moveTo(x0, stage.top())
+                poly.lineTo(x0 + w, stage.top())
+                poly.lineTo(x0 + w - 95, stage.bottom())
+                poly.lineTo(x0 - 95, stage.bottom())
+                poly.closeSubpath()
+                p.setBrush(QColor(col_hex))
+                p.drawPath(poly)
+
+            # Delicate blueprint grid lines inside empty stage
+            p.setPen(QPen(QColor(174, 204, 236, 90), 1))
+            gstep = 36
+            gx = int(stage.left()) + gstep
+            while gx < stage.right():
+                p.drawLine(gx, int(stage.top()), gx, int(stage.bottom()))
+                gx += gstep
+            gy = int(stage.top()) + gstep
+            while gy < stage.bottom():
+                p.drawLine(int(stage.left()), gy, int(stage.right()), gy)
+                gy += gstep
+            p.restore()
+        else:
+            p.fillRect(stage, QColor(pal.bg_stage))
+            if has_frame:
+                p.drawPixmap(stage.toRect(), self._current_frame)
+
+        p.setPen(QPen(QColor(pal.vp_stage_border), 1.5 if pal.is_light else 1.0))
         p.setBrush(Qt.NoBrush)
         p.drawRect(stage)
+
+        if pal.is_light:
+            # Delicate corner registration accents (pastel blue top-left, pastel pink bottom-right)
+            p.setPen(QPen(QColor("#52B4FF"), 2.0))
+            p.drawLine(QPointF(stage.left(), stage.top()), QPointF(stage.left() + 18, stage.top()))
+            p.drawLine(QPointF(stage.left(), stage.top()), QPointF(stage.left(), stage.top() + 18))
+            p.setPen(QPen(QColor("#F484B6"), 2.0))
+            p.drawLine(QPointF(stage.right(), stage.bottom()), QPointF(stage.right() - 18, stage.bottom()))
+            p.drawLine(QPointF(stage.right(), stage.bottom()), QPointF(stage.right(), stage.bottom() - 18))
         p.end()
 
 
 class ColorPickerButton(QPushButton):
-    """Authentic native framed color-picker button showing inset color chip + label + opacity."""
+    """Authentic native framed color-picker button showing inset color chip + label + opacity with hover glow."""
 
     def __init__(self, label: str, hex_col: str, opacity: float, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -488,6 +661,32 @@ class ColorPickerButton(QPushButton):
         self._label = label
         self._hex = hex_col
         self._opacity = opacity
+        self._hover_t: float = 0.0
+        self._hover_anim: Optional[QVariantAnimation] = None
+
+    def _animate_hover(self, target: float) -> None:
+        if self._hover_anim is not None:
+            self._hover_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(110)
+        anim.setStartValue(float(self._hover_t))
+        anim.setEndValue(float(target))
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(self._set_hover_t)
+        self._hover_anim = anim
+        anim.start()
+
+    def _set_hover_t(self, val) -> None:
+        self._hover_t = float(val)
+        self.update()
+
+    def enterEvent(self, ev) -> None:
+        self._animate_hover(1.0)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._animate_hover(0.0)
+        super().leaveEvent(ev)
 
     def set_color_state(self, hex_col: str, opacity: float) -> None:
         self._hex = hex_col
@@ -496,17 +695,30 @@ class ColorPickerButton(QPushButton):
 
     def paintEvent(self, ev) -> None:
         super().paintEvent(ev)
+        pal = get_palette()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
+        if self._hover_t > 0.02:
+            glow = QColor(pal.accent_primary)
+            glow.setAlphaF(0.45 * self._hover_t)
+            p.setPen(QPen(glow, 1.4))
+            p.setBrush(Qt.NoBrush)
+            rr = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+            p.drawRoundedRect(rr, 5.0 if pal.is_light else 2.0, 5.0 if pal.is_light else 2.0)
         chip = QRectF(6, 5, 14, 14)
         # Checker behind chip if translucent
-        p.fillRect(chip, QColor("#1a1a1a"))
+        p.fillRect(chip, QColor("#E2ECF8" if pal.is_light else "#1a1a1a"))
         c = QColor(self._hex)
         c.setAlphaF(max(0.0, min(1.0, self._opacity)))
-        p.fillRect(chip, c)
-        p.setPen(QPen(QColor("#111111"), 1))
-        p.drawRect(chip)
-        p.setPen(QColor("#dcdcdc"))
+        if pal.is_light:
+            p.setPen(QPen(QColor(pal.swatch_border), 1))
+            p.setBrush(c)
+            p.drawRoundedRect(chip, 3.0, 3.0)
+        else:
+            p.fillRect(chip, c)
+            p.setPen(QPen(QColor("#111111"), 1))
+            p.drawRect(chip)
+        p.setPen(QColor(pal.text_primary))
         p.setFont(QFont("Segoe UI", 8))
         txt = f"{self._label} {int(round(self._opacity * 100))}%"
         p.drawText(QRectF(25, 0, self.width() - 30, self.height()), Qt.AlignLeft | Qt.AlignVCenter, txt)
@@ -517,11 +729,101 @@ class ColorPickerButton(QPushButton):
         self.update()
 
 
+class _PaneHeaderBar(QFrame):
+    """Dock pane header featuring subtle dual-tone skewed slash marks in Pastel Light mode."""
+
+    def __init__(self, left_title: str, right_text: str = "", on_close=None, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("paneHdr")
+        self.setFixedHeight(24)
+        self._has_close = on_close is not None
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 0, 5 if on_close else 8, 0)
+        lay.setSpacing(6)
+        self._lay = lay
+
+        self.l_lbl = QLabel(left_title)
+        self.r_lbl = QLabel(right_text)
+        lay.addWidget(self.l_lbl)
+        lay.addStretch(1)
+        lay.addWidget(self.r_lbl)
+
+        self.btn_x: Optional[QPushButton] = None
+        if on_close is not None:
+            btn_x = QPushButton("×")
+            btn_x.setObjectName("toolBtn")
+            btn_x.setFixedSize(16, 16)
+            btn_x.setToolTip(tr("pane.close_tip"))
+            btn_x.clicked.connect(on_close)
+            lay.addWidget(btn_x)
+            self.btn_x = btn_x
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        pal = get_palette()
+        self.setFixedHeight(25 if pal.is_light else 22)
+        self._lay.setContentsMargins(24 if pal.is_light else 8, 0, 6 if self._has_close else 10, 0)
+        self.setStyleSheet("QFrame#paneHdr { background: transparent; border: none; }")
+        self.l_lbl.setStyleSheet(
+            f"color: {pal.hdr_title}; font-size: 11px; font-weight: {'700' if pal.is_light else '600'}; background: transparent; border: none;"
+        )
+        self.r_lbl.setStyleSheet(
+            f"color: {pal.hdr_meta}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 10px; background: transparent; border: none;"
+        )
+        if self.btn_x is not None:
+            self.btn_x.setStyleSheet(
+                f"QPushButton {{ color: {pal.hdr_close_fg}; font-size: 12px; padding: 0; border: none; background: transparent; }}"
+                f"QPushButton:hover {{ color: {pal.hdr_close_hover_fg}; background: {pal.hdr_close_hover_bg}; border-radius: 3px; }}"
+            )
+        self.update()
+
+    def retranslate_ui(self) -> None:
+        if self.btn_x is not None:
+            self.btn_x.setToolTip(tr("pane.close_tip"))
+
+    def paintEvent(self, _ev) -> None:
+        pal = get_palette()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = self.rect()
+        p.fillRect(r, QColor(pal.hdr_bg))
+
+        if pal.is_light:
+            # Dual skewed parallelograms (Pastel Sky Blue + Pastel Pink)
+            h = float(r.height())
+            y0, y1 = 6.0, h - 6.0
+            slant = 3.2
+            p.setPen(Qt.NoPen)
+
+            blue_poly = QPainterPath()
+            blue_poly.moveTo(8.0 + slant, y0)
+            blue_poly.lineTo(13.0 + slant, y0)
+            blue_poly.lineTo(13.0, y1)
+            blue_poly.lineTo(8.0, y1)
+            blue_poly.closeSubpath()
+            p.setBrush(QColor("#47A8FF"))
+            p.drawPath(blue_poly)
+
+            pink_poly = QPainterPath()
+            pink_poly.moveTo(15.0 + slant, y0)
+            pink_poly.lineTo(18.2 + slant, y0)
+            pink_poly.lineTo(18.2, y1)
+            pink_poly.lineTo(15.0, y1)
+            pink_poly.closeSubpath()
+            p.setBrush(QColor("#F484B6"))
+            p.drawPath(pink_poly)
+
+        p.setPen(QPen(QColor(pal.hdr_border), 1))
+        p.drawLine(0, r.height() - 1, r.width(), r.height() - 1)
+        p.end()
+
+
 def _vsep() -> QFrame:
     f = QFrame()
     f.setFrameShape(QFrame.VLine)
     f.setFixedWidth(1)
-    f.setStyleSheet("background-color: #343434; border: none;")
+    f.setStyleSheet(f"background-color: {get_palette().sep_color}; border: none;")
     return f
 
 
@@ -529,7 +831,7 @@ def _hsep() -> QFrame:
     f = QFrame()
     f.setFrameShape(QFrame.HLine)
     f.setFixedHeight(1)
-    f.setStyleSheet("background-color: #303030; border: none;")
+    f.setStyleSheet(f"background-color: {get_palette().sep_color}; border: none;")
     return f
 
 
@@ -537,33 +839,9 @@ def _pane_header(
     left_title: str,
     right_text: str = "",
     on_close=None,
-) -> tuple[QFrame, QLabel, QLabel]:
-    bar = QFrame()
-    bar.setObjectName("paneHdr")
-    bar.setFixedHeight(22)
-    bar.setStyleSheet("QFrame#paneHdr { background-color: #292929; border-bottom: 1px solid #161616; }")
-    lay = QHBoxLayout(bar)
-    lay.setContentsMargins(8, 0, 5 if on_close else 8, 0)
-    lay.setSpacing(6)
-    l_lbl = QLabel(left_title)
-    l_lbl.setStyleSheet("color: #c6c6c6; font-size: 11px; font-weight: 600; background: transparent; border: none;")
-    r_lbl = QLabel(right_text)
-    r_lbl.setStyleSheet("color: #8a8a8a; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 10px; background: transparent; border: none;")
-    lay.addWidget(l_lbl)
-    lay.addStretch(1)
-    lay.addWidget(r_lbl)
-    if on_close is not None:
-        btn_x = QPushButton("×")
-        btn_x.setObjectName("toolBtn")
-        btn_x.setFixedSize(16, 16)
-        btn_x.setToolTip("패널 닫기 (Tab)")
-        btn_x.setStyleSheet(
-            "QPushButton { color: #8c8c8c; font-size: 12px; padding: 0; border: none; background: transparent; }"
-            "QPushButton:hover { color: #ffffff; background: #3a3a3a; border-radius: 2px; }"
-        )
-        btn_x.clicked.connect(on_close)
-        lay.addWidget(btn_x)
-    return bar, l_lbl, r_lbl
+) -> tuple[_PaneHeaderBar, QLabel, QLabel]:
+    bar = _PaneHeaderBar(left_title, right_text, on_close=on_close)
+    return bar, bar.l_lbl, bar.r_lbl
 
 
 class MainWindow(QMainWindow):
@@ -618,6 +896,7 @@ class MainWindow(QMainWindow):
             "end_padding_sec": 2.0,
             "hide_countdown": True,
         }
+        self.proxy_state: dict = load_proxy_settings()
         self.output_path: str = ""
 
         self._playing: bool = False
@@ -637,9 +916,17 @@ class MainWindow(QMainWindow):
         self._preview_runner: Optional[RenderRunner] = None
         self._syncing_controls: bool = False
 
+        self._pane_headers: List[_PaneHeaderBar] = []
+        self._hseps: List[QFrame] = []
+        self._vseps: List[QFrame] = []
+        self._muted_labels: List[QLabel] = []
+        self._est_vals: List[QLabel] = []
+        self._tool_btn_specs: List[tuple[QPushButton, str]] = []
+
         self._build_menubar()
         self._build_workstation()
         self._build_statusbar()
+        self.apply_theme()
         self._refresh_summary_ui()
 
         if preload.sample_levels:
@@ -662,7 +949,7 @@ class MainWindow(QMainWindow):
         self.m_file = mb.addMenu(tr("menu.file"))
         self.act_open = QAction(tr("menu.open_level"), self)
         self.act_open.setShortcut(QKeySequence("Ctrl+O"))
-        self.act_open.triggered.connect(self._open_file_dialog)
+        self.act_open.triggered.connect(lambda _=False: self._open_file_dialog())
         self.m_file.addAction(self.act_open)
 
         self.m_samples = QMenu(tr("menu.samples"), self)
@@ -747,6 +1034,10 @@ class MainWindow(QMainWindow):
         self.act_prev_force.triggered.connect(lambda: self._start_preview_build(force_rebuild=True))
         self.m_seq.addAction(self.act_prev_force)
 
+        self.act_proxy_cfg = QAction(tr("menu.proxy_cfg"), self)
+        self.act_proxy_cfg.triggered.connect(self._open_proxy_dialog)
+        self.m_seq.addAction(self.act_proxy_cfg)
+
         self.m_seq.addSeparator()
         self.act_seq_cfg = QAction(tr("menu.open_seq_tab"), self)
         self.act_seq_cfg.triggered.connect(lambda: self._focus_inspector_tab(1))
@@ -765,6 +1056,21 @@ class MainWindow(QMainWindow):
         self.act_toggle_inspector.toggled.connect(self._toggle_inspector)
         self.m_view.addAction(self.act_toggle_inspector)
 
+        self.m_theme = QMenu(tr("menu.theme"), self)
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        self._theme_actions: dict[str, QAction] = {}
+        cur_theme = get_theme()
+        for tcode, tkey in (("dark", "menu.theme_dark"), ("pastel_light", "menu.theme_light")):
+            ta = QAction(tr(tkey), self)
+            ta.setCheckable(True)
+            ta.setChecked(tcode == cur_theme)
+            ta.triggered.connect(lambda _=False, tc=tcode: self._switch_theme(tc))
+            self._theme_group.addAction(ta)
+            self.m_theme.addAction(ta)
+            self._theme_actions[tcode] = ta
+        self.m_view.addMenu(self.m_theme)
+
         self.m_view.addSeparator()
         self.act_zi = QAction(tr("menu.zoom_in"), self)
         self.act_zi.setShortcut(QKeySequence("Ctrl+="))
@@ -777,7 +1083,7 @@ class MainWindow(QMainWindow):
         self.m_view.addAction(self.act_zo)
 
         self.act_zf = QAction(tr("menu.zoom_fit"), self)
-        self.act_zf.triggered.connect(lambda: self.timeline.set_zoom(1.0))
+        self.act_zf.triggered.connect(lambda: self.timeline.animate_zoom(1.0))
         self.m_view.addAction(self.act_zf)
 
         # Render
@@ -833,14 +1139,14 @@ class MainWindow(QMainWindow):
         self.main_split.setChildrenCollapsible(False)
 
         # Left Dock Pane: Viewer Header + 16:9 Canvas + Calibrated Stereo dB Meter
-        left_pane = QFrame()
-        left_pane.setObjectName("leftPane")
-        left_pane.setStyleSheet("QFrame#leftPane { background-color: #141414; border-right: 1px solid #101010; }")
-        lp = QVBoxLayout(left_pane)
+        self._left_pane = QFrame()
+        self._left_pane.setObjectName("leftPane")
+        lp = QVBoxLayout(self._left_pane)
         lp.setContentsMargins(0, 0, 0, 0)
         lp.setSpacing(0)
 
         vp_hdr, self.lbl_vp_title, self.lbl_vp_mode = _pane_header(tr("vp.header"), tr("vp.mode_fit"))
+        self._pane_headers.append(vp_hdr)
         lp.addWidget(vp_hdr)
 
         vp_body = QHBoxLayout()
@@ -854,7 +1160,7 @@ class MainWindow(QMainWindow):
         vp_body.addWidget(self.vu_meter, 0)
         lp.addLayout(vp_body, 1)
 
-        self.main_split.addWidget(left_pane)
+        self.main_split.addWidget(self._left_pane)
 
         # Right Dock Pane: Native Tabbed Inspector Dock (QTabWidget + QScrollArea + Closable Header)
         self.inspector = QFrame()
@@ -868,11 +1174,13 @@ class MainWindow(QMainWindow):
         insp_hdr, self.lbl_insp_hdr, self.lbl_insp_bpm = _pane_header(
             tr("insp.header"), "", on_close=lambda: self.act_toggle_inspector.setChecked(False)
         )
+        self._pane_headers.append(insp_hdr)
         insp_outer.addWidget(insp_hdr)
 
         self.insp_tabs = QTabWidget()
         self.insp_tabs.setObjectName("inspectorTabs")
         self.insp_tabs.setDocumentMode(False)
+        self.insp_tabs.currentChanged.connect(self._on_inspector_tab_changed)
         insp_outer.addWidget(self.insp_tabs, 1)
 
         # ---- Tab 1: Output (Export & Range) inside QScrollArea ----
@@ -880,12 +1188,11 @@ class MainWindow(QMainWindow):
         tab_out_scroll.setFrameShape(QFrame.NoFrame)
         tab_out_scroll.setWidgetResizable(True)
         tab_out_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        tab_out_body = QWidget()
-        tab_out_body.setStyleSheet("background-color: #232323;")
-        insp = QVBoxLayout(tab_out_body)
+        self._tab_out_body = QWidget()
+        insp = QVBoxLayout(self._tab_out_body)
         insp.setContentsMargins(9, 6, 9, 6)
         insp.setSpacing(5)
-        tab_out_scroll.setWidget(tab_out_body)
+        tab_out_scroll.setWidget(self._tab_out_body)
         self.insp_tabs.addTab(tab_out_scroll, tr("insp.tab_out"))
 
         # 1) Level Identity
@@ -899,7 +1206,7 @@ class MainWindow(QMainWindow):
         self.lbl_lvl_sub.setObjectName("muted")
         insp.addWidget(self.lbl_lvl_sub)
 
-        insp.addWidget(_hsep())
+        insp.addWidget(self._make_hsep())
 
         # 2) Video & Audio Controls
         g_vid = QGridLayout()
@@ -949,8 +1256,19 @@ class MainWindow(QMainWindow):
         self.cmb_codec.currentIndexChanged.connect(self._on_quick_export_changed)
         g_vid.addWidget(self.cmb_codec, 2, 3)
 
+        self.lbl_k_bitrate = self._muted_lbl(tr("insp.bitrate"))
+        g_vid.addWidget(self.lbl_k_bitrate, 3, 0)
+        self.cmb_bitrate = QComboBox()
+        self.cmb_bitrate.setFixedHeight(24)
+        self.cmb_bitrate.addItem(tr("insp.br_high"), "ultra")
+        self.cmb_bitrate.addItem(tr("insp.br_mid"), "high")
+        self.cmb_bitrate.addItem(tr("insp.br_low"), "balanced")
+        self.cmb_bitrate.setCurrentIndex(1)
+        self.cmb_bitrate.currentIndexChanged.connect(self._on_quick_export_changed)
+        g_vid.addWidget(self.cmb_bitrate, 3, 1, 1, 3)
+
         self.lbl_k_audio = self._muted_lbl(tr("insp.audio"))
-        g_vid.addWidget(self.lbl_k_audio, 3, 0)
+        g_vid.addWidget(self.lbl_k_audio, 4, 0)
         aud_row = QHBoxLayout()
         aud_row.setSpacing(12)
         self.chk_bgm = QCheckBox(tr("insp.bgm"))
@@ -962,13 +1280,13 @@ class MainWindow(QMainWindow):
         aud_row.addWidget(self.chk_bgm)
         aud_row.addWidget(self.chk_hit)
         aud_row.addStretch(1)
-        g_vid.addLayout(aud_row, 3, 1, 1, 3)
+        g_vid.addLayout(aud_row, 4, 1, 1, 3)
 
         g_vid.setColumnStretch(1, 1)
         g_vid.setColumnStretch(3, 1)
         insp.addLayout(g_vid)
 
-        insp.addWidget(_hsep())
+        insp.addWidget(self._make_hsep())
 
         # 3) Interactive Trim Range (unified MM:SS.d TimecodeSpinBox)
         rng_hdr = QHBoxLayout()
@@ -1007,7 +1325,7 @@ class MainWindow(QMainWindow):
         g_trim.setColumnStretch(3, 1)
         insp.addLayout(g_trim)
 
-        insp.addWidget(_hsep())
+        insp.addWidget(self._make_hsep())
 
         # 4) Output File Destination (filename field + folder row with '...' browse button)
         g_out = QGridLayout()
@@ -1028,7 +1346,6 @@ class MainWindow(QMainWindow):
         self.ed_out_dir.setFixedHeight(23)
         self.ed_out_dir.setMinimumWidth(80)
         self.ed_out_dir.setReadOnly(True)
-        self.ed_out_dir.setStyleSheet("color: #9e9e9e; font-size: 11px;")
         g_out.addWidget(self.ed_out_dir, 1, 1)
 
         self.btn_browse_dir = QPushButton("...")
@@ -1040,13 +1357,12 @@ class MainWindow(QMainWindow):
         g_out.setColumnStretch(1, 1)
         insp.addLayout(g_out)
 
-        insp.addWidget(_hsep())
+        insp.addWidget(self._make_hsep())
 
         # 5) Live Output Estimate Box (concise 3 rows; encoder already shown in status bar)
-        est_frame = QFrame()
-        est_frame.setObjectName("estBox")
-        est_frame.setStyleSheet("QFrame#estBox { background-color: #1b1b1b; border: 1px solid #2d2d2d; border-radius: 2px; }")
-        ge = QGridLayout(est_frame)
+        self._est_frame = QFrame()
+        self._est_frame.setObjectName("estBox")
+        ge = QGridLayout(self._est_frame)
         ge.setContentsMargins(8, 5, 8, 5)
         ge.setVerticalSpacing(3)
         ge.setHorizontalSpacing(8)
@@ -1054,7 +1370,7 @@ class MainWindow(QMainWindow):
         self.lbl_est_size, self.val_est_size = self._add_est_row(ge, 1, tr("insp.est_size"), "-")
         self.lbl_est_time, self.val_est_time = self._add_est_row(ge, 2, tr("insp.est_time"), "-")
         ge.setColumnStretch(1, 1)
-        insp.addWidget(est_frame)
+        insp.addWidget(self._est_frame)
         insp.addStretch(1)
 
         # ---- Tab 2: Planets & Sequence inside QScrollArea ----
@@ -1062,12 +1378,11 @@ class MainWindow(QMainWindow):
         tab_seq_scroll.setFrameShape(QFrame.NoFrame)
         tab_seq_scroll.setWidgetResizable(True)
         tab_seq_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        tab_seq_body = QWidget()
-        tab_seq_body.setStyleSheet("background-color: #232323;")
-        slay = QVBoxLayout(tab_seq_body)
+        self._tab_seq_body = QWidget()
+        slay = QVBoxLayout(self._tab_seq_body)
         slay.setContentsMargins(10, 8, 10, 8)
         slay.setSpacing(7)
-        tab_seq_scroll.setWidget(tab_seq_body)
+        tab_seq_scroll.setWidget(self._tab_seq_body)
         self.insp_tabs.addTab(tab_seq_scroll, tr("insp.tab_seq"))
 
         self.lbl_pl_hdr = QLabel(tr("insp.planet_hdr"))
@@ -1093,7 +1408,7 @@ class MainWindow(QMainWindow):
         self.btn_pl_rst.clicked.connect(self._reset_planet_defaults)
         slay.addWidget(self.btn_pl_rst)
 
-        slay.addWidget(_hsep())
+        slay.addWidget(self._make_hsep())
 
         self.lbl_seq_hdr = QLabel(tr("insp.seq_hdr"))
         self.lbl_seq_hdr.setObjectName("sectionHdr")
@@ -1123,10 +1438,9 @@ class MainWindow(QMainWindow):
         slay.addStretch(1)
 
         # Pinned Dock Footer Actions (always accessible regardless of tab or scroll)
-        footer_bar = QFrame()
-        footer_bar.setObjectName("inspFooter")
-        footer_bar.setStyleSheet("QFrame#inspFooter { background-color: #202020; border-top: 1px solid #2e2e2e; }")
-        act_row = QHBoxLayout(footer_bar)
+        self._footer_bar = QFrame()
+        self._footer_bar.setObjectName("inspFooter")
+        act_row = QHBoxLayout(self._footer_bar)
         act_row.setContentsMargins(10, 7, 10, 8)
         act_row.setSpacing(6)
         self.btn_adv = QPushButton(tr("insp.btn_adv"))
@@ -1141,7 +1455,7 @@ class MainWindow(QMainWindow):
 
         act_row.addWidget(self.btn_adv, 1)
         act_row.addWidget(self.btn_render, 2)
-        insp_outer.addWidget(footer_bar)
+        insp_outer.addWidget(self._footer_bar)
 
         self.main_split.addWidget(self.inspector)
         self.main_split.setSizes([864, 316])
@@ -1151,14 +1465,14 @@ class MainWindow(QMainWindow):
         self.vert_split.addWidget(self.main_split)
 
         # Bottom Dock: Resizable Timeline Header + Balanced Transport + 3-Lane Timeline
-        dock = QFrame()
-        dock.setObjectName("tlDock")
-        dock.setStyleSheet("QFrame#tlDock { background-color: #1c1c1c; border-top: 1px solid #101010; }")
-        dl = QVBoxLayout(dock)
+        self._tl_dock = QFrame()
+        self._tl_dock.setObjectName("tlDock")
+        dl = QVBoxLayout(self._tl_dock)
         dl.setContentsMargins(0, 0, 0, 0)
         dl.setSpacing(0)
 
         tl_hdr, self.lbl_tl_hdr, self.lbl_tl_range = _pane_header(tr("tl.header"), tr("tl.full_range"))
+        self._pane_headers.append(tl_hdr)
         dl.addWidget(tl_hdr)
 
         inner_tl = QVBoxLayout()
@@ -1177,11 +1491,10 @@ class MainWindow(QMainWindow):
         tr_row.addWidget(self.lbl_tc)
 
         self.lbl_frame_num = QLabel(tr("tl.frame_num", n=0))
-        self.lbl_frame_num.setStyleSheet("color: #909090; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
         self.lbl_frame_num.setMinimumWidth(72)
         tr_row.addWidget(self.lbl_frame_num)
 
-        tr_row.addWidget(_vsep())
+        tr_row.addWidget(self._make_vsep())
 
         self.btn_to_start = self._make_tool_btn("start", tr("tl.tip_start"), self._jump_start)
         self.btn_step_back = self._make_tool_btn("step_back", tr("tl.tip_step_back"), lambda: self._step_frame(-1))
@@ -1192,17 +1505,17 @@ class MainWindow(QMainWindow):
         for b in (self.btn_to_start, self.btn_step_back, self.btn_play, self.btn_step_fwd, self.btn_to_end):
             tr_row.addWidget(b)
 
-        tr_row.addWidget(_vsep())
+        tr_row.addWidget(self._make_vsep())
 
         self.btn_mark_in = self._make_tool_btn("mark_in", tr("tl.tip_mark_in"), self._mark_in)
         self.btn_mark_out = self._make_tool_btn("mark_out", tr("tl.tip_mark_out"), self._mark_out)
         tr_row.addWidget(self.btn_mark_in)
         tr_row.addWidget(self.btn_mark_out)
 
-        tr_row.addWidget(_vsep())
+        tr_row.addWidget(self._make_vsep())
 
         self.cmb_speed = QComboBox()
-        self.cmb_speed.setFixedSize(68, 24)
+        self.cmb_speed.setFixedSize(76, 24)
         for lbl, val in (("0.5x", 0.5), ("1.0x", 1.0), ("1.5x", 1.5), ("2.0x", 2.0)):
             self.cmb_speed.addItem(lbl, val)
         self.cmb_speed.setCurrentIndex(1)
@@ -1243,7 +1556,6 @@ class MainWindow(QMainWindow):
         tr_row.addWidget(btn_z_in)
 
         self.lbl_zoom_val = QLabel("100%")
-        self.lbl_zoom_val.setStyleSheet("color: #9a9a9a; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
         self.lbl_zoom_val.setFixedWidth(36)
         self.lbl_zoom_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         tr_row.addWidget(self.lbl_zoom_val)
@@ -1251,7 +1563,7 @@ class MainWindow(QMainWindow):
         self.btn_fit = QPushButton(tr("tl.btn_fit"))
         self.btn_fit.setObjectName("chipBtn")
         self.btn_fit.setFixedHeight(22)
-        self.btn_fit.clicked.connect(lambda: self.timeline.set_zoom(1.0))
+        self.btn_fit.clicked.connect(lambda: self.timeline.animate_zoom(1.0))
         tr_row.addWidget(self.btn_fit)
 
         inner_tl.addLayout(tr_row)
@@ -1276,23 +1588,35 @@ class MainWindow(QMainWindow):
         inner_tl.addWidget(self._tl_scroll_wrap)
         self.timeline.view_changed.connect(self._sync_tl_scroll)
 
-        self.vert_split.addWidget(dock)
+        self.vert_split.addWidget(self._tl_dock)
         self.vert_split.setSizes([505, 178])
         self.vert_split.setStretchFactor(0, 1)
         self.vert_split.setStretchFactor(1, 0)
 
         root.addWidget(self.vert_split, 1)
 
+    def _make_hsep(self) -> QFrame:
+        f = _hsep()
+        self._hseps.append(f)
+        return f
+
+    def _make_vsep(self) -> QFrame:
+        f = _vsep()
+        self._vseps.append(f)
+        return f
+
     def _muted_lbl(self, text: str) -> QLabel:
         l = QLabel(text)
-        l.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        l.setStyleSheet(f"color: {get_palette().text_secondary}; font-size: 11px; background: transparent;")
+        self._muted_labels.append(l)
         return l
 
     def _add_est_row(self, grid: QGridLayout, row: int, key: str, val: str) -> tuple[QLabel, QLabel]:
         lk = self._muted_lbl(key)
         lv = QLabel(val)
         lv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        lv.setStyleSheet("font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: #d6d6d6;")
+        lv.setStyleSheet(f"font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: {get_palette().text_mono}; background: transparent;")
+        self._est_vals.append(lv)
         grid.addWidget(lk, row, 0)
         grid.addWidget(lv, row, 1)
         return lk, lv
@@ -1309,22 +1633,23 @@ class MainWindow(QMainWindow):
         self.sb_state.setContentsMargins(0, 0, 10, 0)
 
         sb.addWidget(self.sb_enc, 1)
-        sb.addPermanentWidget(_vsep())
+        sb.addPermanentWidget(self._make_vsep())
         sb.addPermanentWidget(self.sb_engine)
-        sb.addPermanentWidget(_vsep())
+        sb.addPermanentWidget(self._make_vsep())
         sb.addPermanentWidget(self.sb_chart)
-        sb.addPermanentWidget(_vsep())
+        sb.addPermanentWidget(self._make_vsep())
         sb.addPermanentWidget(self.sb_state)
         self._update_statusbar()
 
     def _make_tool_btn(self, icon_kind: str, tip: str, slot) -> QPushButton:
         b = QPushButton()
         b.setObjectName("toolBtn")
-        b.setIcon(make_icon(icon_kind, "#d4d4d4", 14))
+        b.setIcon(make_icon(icon_kind, get_palette().icon_color, 14))
         b.setIconSize(QSize(14, 14))
         b.setFixedSize(26, 24)
         b.setToolTip(tip)
         b.clicked.connect(slot)
+        self._tool_btn_specs.append((b, icon_kind))
         return b
 
     # ------------------------------------------------------------------ Drag & Drop / Keyboard
@@ -1363,13 +1688,19 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ Level Import (Unified Auto-Format)
     def _open_file_dialog(self) -> None:
-        start_dir = os.path.join(PROJECT_ROOT, "level")
-        if not os.path.isdir(start_dir):
-            start_dir = PROJECT_ROOT
+        start_dir = getattr(self, "_last_open_dir", "")
+        if not start_dir or not os.path.isdir(start_dir):
+            cand = os.path.join(PROJECT_ROOT, "level")
+            if os.path.isdir(cand):
+                start_dir = cand
+            else:
+                dl = os.path.join(os.path.expanduser("~"), "Downloads")
+                start_dir = dl if os.path.isdir(dl) else os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
             self, tr("dlg.open_title"), start_dir, tr("dlg.open_filter")
         )
         if path:
+            self._last_open_dir = os.path.dirname(path)
             self._import_any_path(path)
 
     def _import_any_path(self, raw_path: str) -> None:
@@ -1409,7 +1740,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{self.level_info.display_title} — ADOFAI PV Renderer")
         self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
-        self.lbl_vp_mode.setText(tr("vp.mode_none"))
+        self._update_vp_mode_label()
         detail = tr(
             "vp.level_detail",
             bpm=self.level_info.bpm,
@@ -1430,6 +1761,17 @@ class MainWindow(QMainWindow):
                 self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
                 self._start_waveform_worker(self.level_info.song_path)
 
+    def _update_vp_mode_label(self) -> None:
+        pw = self.proxy_state["width"]
+        ph = self.proxy_state["height"]
+        pf = self.proxy_state["fps"]
+        if not self.level_path:
+            self.lbl_vp_mode.setText(tr("vp.mode_fit"))
+        elif self.viewport.has_video():
+            self.lbl_vp_mode.setText(tr("vp.mode_proxy", w=pw, h=ph, fps=pf))
+        else:
+            self.lbl_vp_mode.setText(tr("vp.mode_none_spec", h=ph, fps=pf))
+
     def _start_waveform_worker(self, audio_src: str) -> None:
         if not audio_src or not os.path.isfile(audio_src):
             return
@@ -1448,13 +1790,16 @@ class MainWindow(QMainWindow):
     def _try_load_cached_preview(self) -> None:
         if not self.level_path or not os.path.isfile(self.level_path):
             return
-        st = os.stat(self.level_path)
-        key_src = (
-            f"{self.level_path}|{st.st_size}|{int(st.st_mtime)}|"
-            f"{self.planet_state['red_color']}|{self.planet_state['red_opacity']:.2f}|"
-            f"{self.planet_state['blue_color']}|{self.planet_state['blue_opacity']:.2f}|v6"
+        h = compute_preview_cache_key(
+            self.level_path,
+            self.planet_state["red_color"],
+            self.planet_state["red_opacity"],
+            self.planet_state["blue_color"],
+            self.planet_state["blue_opacity"],
+            self.proxy_state["width"],
+            self.proxy_state["height"],
+            self.proxy_state["fps"],
         )
-        h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
         mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")
         if os.path.isfile(mp4) and os.path.getsize(mp4) > 2048 and os.path.isfile(mp4 + ".ok"):
@@ -1477,11 +1822,47 @@ class MainWindow(QMainWindow):
             self._audio_player.setSource(QUrl.fromLocalFile(video_path))
             self._start_waveform_worker(video_path)
             self.viewport.seek_seconds(self.timeline.playhead)
-            self.lbl_vp_mode.setText(tr("vp.mode_fit"))
+            self._update_vp_mode_label()
             self._update_timecode_label()
             self._refresh_trim_summary()
 
-    # ------------------------------------------------------------------ Rough Preview Builder
+    # ------------------------------------------------------------------ Proxy Builder
+    def _open_proxy_dialog(self) -> None:
+        dlg = ProxySettingsDialog(
+            width=self.proxy_state["width"],
+            height=self.proxy_state["height"],
+            fps=self.proxy_state["fps"],
+            parent=self,
+        )
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            pw, ph, pf = dlg.result_spec()
+            changed = (
+                pw != self.proxy_state["width"]
+                or ph != self.proxy_state["height"]
+                or pf != self.proxy_state["fps"]
+            )
+            self.proxy_state = save_proxy_settings(pw, ph, pf)
+            if changed and self.level_path:
+                self._stop_playback()
+                self._audio_player.setSource(QUrl())
+                self.viewport.clear_video()
+                self.timeline.set_filmstrip("")
+                if self.level_info:
+                    detail = tr(
+                        "vp.level_detail",
+                        bpm=self.level_info.bpm,
+                        tiles=self.level_info.tile_count,
+                        decos=self.level_info.decoration_count,
+                        filts=len(self.level_info.filters),
+                    )
+                    self.viewport.set_level_placeholder(self.level_info.display_title, detail)
+                self._try_load_cached_preview()
+                if not self.viewport.has_video() and self.level_info and self.level_info.song_path and os.path.isfile(self.level_info.song_path):
+                    self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
+                    self._start_waveform_worker(self.level_info.song_path)
+            self._update_vp_mode_label()
+            self.statusBar().showMessage(tr("sb.proxy_updated", w=pw, h=ph, fps=pf), 4000)
+
     def _start_preview_build(self, force_rebuild: bool = False) -> None:
         if not self.level_path or not os.path.isfile(self.level_path):
             QMessageBox.information(self, tr("dlg.no_level_title"), tr("dlg.no_level_preview_msg"))
@@ -1508,6 +1889,9 @@ class MainWindow(QMainWindow):
             blue_opacity=self.planet_state["blue_opacity"],
             gpu_limit=self.export_state["gpu_limit_percent"],
             force_rebuild=force_rebuild,
+            proxy_width=self.proxy_state["width"],
+            proxy_height=self.proxy_state["height"],
+            proxy_fps=self.proxy_state["fps"],
         )
         self._preview_worker.progress.connect(self._on_preview_progress)
         self._preview_worker.done.connect(self._on_preview_done)
@@ -1534,7 +1918,7 @@ class MainWindow(QMainWindow):
             shutil.rmtree(PREVIEW_CACHE_DIR, ignore_errors=True)
             os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
         self.timeline.set_filmstrip("")
-        self.lbl_vp_mode.setText(tr("vp.mode_none"))
+        self._update_vp_mode_label()
         if self.level_info:
             detail = tr(
                 "vp.level_detail",
@@ -1558,6 +1942,7 @@ class MainWindow(QMainWindow):
         self.export_state["fps"] = self.spn_fps.value()
         self.export_state["format"] = self.cmb_fmt.currentData()
         self.export_state["codec"] = self.cmb_codec.currentData()
+        self.export_state["quality"] = self.cmb_bitrate.currentData() or "high"
         self.export_state["include_bgm"] = self.chk_bgm.isChecked()
         self.export_state["include_hitsounds"] = self.chk_hit.isChecked()
         self._sync_default_output_path()
@@ -1604,7 +1989,7 @@ class MainWindow(QMainWindow):
             self._stop_playback()
             return
         self._playing = True
-        self.btn_play.setIcon(make_icon("pause", "#d4d4d4", 14))
+        self.btn_play.setIcon(make_icon("pause", get_palette().icon_color, 14))
         if self._audio_player.source().isValid():
             self._audio_player.setPlaybackRate(self._playback_rate)
             self._audio_player.setPosition(int(self.timeline.playhead * 1000))
@@ -1615,7 +2000,7 @@ class MainWindow(QMainWindow):
         self._playing = False
         self._play_timer.stop()
         self._audio_player.pause()
-        self.btn_play.setIcon(make_icon("play", "#d4d4d4", 14))
+        self.btn_play.setIcon(make_icon("play", get_palette().icon_color, 14))
         self.vu_meter.set_levels(0.0, 0.0, clear_peak=True)
 
     def _on_play_tick(self) -> None:
@@ -1668,7 +2053,9 @@ class MainWindow(QMainWindow):
         self._muted = bool(muted)
         self._audio_out.setMuted(self._muted)
         self.timeline.set_audio_muted(self._muted)
-        self.btn_mute.setIcon(make_icon("volume_off" if self._muted else "volume_on", "#d4d4d4", 14))
+        pal = get_palette()
+        ic_col = pal.accent_danger if (self._muted and pal.is_light) else pal.icon_color
+        self.btn_mute.setIcon(make_icon("volume_off" if self._muted else "volume_on", ic_col, 14))
         if self._muted:
             self.vu_meter.set_levels(0.0, 0.0)
 
@@ -1717,7 +2104,7 @@ class MainWindow(QMainWindow):
         self.sld_zoom.blockSignals(False)
 
     def _adjust_zoom(self, factor: float) -> None:
-        self.timeline.set_zoom(self.timeline.zoom * factor)
+        self.timeline.animate_zoom(self.timeline.zoom * factor)
 
     def _jump_start(self) -> None:
         pos = self.timeline.trim_in if self.timeline.is_trimmed else 0.0
@@ -2053,6 +2440,8 @@ class MainWindow(QMainWindow):
                 self.spn_fps.setValue(self.export_state["fps"])
             self.cmb_fmt.setCurrentIndex(1 if self.export_state["format"] == "mkv" else 0)
             self.cmb_codec.setCurrentIndex(1 if self.export_state["codec"] == "hevc" else 0)
+            q_idx = {"ultra": 0, "high": 1, "balanced": 2}.get(self.export_state.get("quality", "high"), 1)
+            self.cmb_bitrate.setCurrentIndex(q_idx)
             self.chk_bgm.setChecked(self.export_state["include_bgm"])
             self.chk_hit.setChecked(self.export_state["include_hitsounds"])
 
@@ -2137,6 +2526,107 @@ class MainWindow(QMainWindow):
         else:
             self.sb_chart.setText(tr("sb.no_level"))
 
+    def _on_inspector_tab_changed(self, idx: int) -> None:
+        target = self._tab_out_body if idx == 0 else self._tab_seq_body
+        if self.isVisible():
+            fade_in_widget(target, start=0.45, duration_ms=130)
+
+    # ------------------------------------------------------------------ Live Theme Switching
+    def _switch_theme(self, theme_name: str) -> None:
+        chosen = set_theme(theme_name, persist=True)
+        for code, act in self._theme_actions.items():
+            act.blockSignals(True)
+            act.setChecked(code == chosen)
+            act.blockSignals(False)
+        self.apply_theme()
+        if self.isVisible():
+            anim = QPropertyAnimation(self, b"windowOpacity", self)
+            anim.setDuration(140)
+            anim.setStartValue(0.86)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._theme_fade_anim = anim
+            anim.start()
+
+    def apply_theme(self) -> None:
+        pal = get_palette()
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_studio_qss())
+
+        # Pane containers
+        self._left_pane.setStyleSheet(
+            f"QFrame#leftPane {{ background-color: {pal.bg_canvas}; border-right: 1px solid {pal.hdr_border}; }}"
+        )
+        self._tab_out_body.setStyleSheet(f"background-color: {pal.bg_inspector};")
+        self._tab_seq_body.setStyleSheet(f"background-color: {pal.bg_inspector};")
+        self._footer_bar.setStyleSheet(
+            f"QFrame#inspFooter {{ background-color: {pal.bg_inspector_footer}; border-top: 1px solid {pal.border_subtle}; }}"
+        )
+        if pal.is_light:
+            self._est_frame.setStyleSheet(
+                f"QFrame#estBox {{ background-color: {pal.bg_est_box}; border: 1px solid {pal.border_subtle}; "
+                f"border-left: 3px solid {pal.accent_pink}; border-radius: 6px; }}"
+            )
+        else:
+            self._est_frame.setStyleSheet(
+                f"QFrame#estBox {{ background-color: {pal.bg_est_box}; border: 1px solid {pal.border_subtle}; border-radius: 2px; }}"
+            )
+        self._tl_dock.setStyleSheet(
+            f"QFrame#tlDock {{ background-color: {pal.bg_timeline_dock}; border-top: 1px solid {pal.hdr_border}; }}"
+        )
+
+        # Separators
+        for hsep in self._hseps:
+            hsep.setStyleSheet(f"background-color: {pal.sep_color}; border: none;")
+        for vsep in self._vseps:
+            vsep.setStyleSheet(f"background-color: {pal.sep_color}; border: none;")
+
+        # Headers & labels
+        for hdr in self._pane_headers:
+            hdr.apply_theme()
+        for ml in self._muted_labels:
+            ml.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; background: transparent;")
+        for ev in self._est_vals:
+            ev.setStyleSheet(
+                f"font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; "
+                f"font-weight: {'600' if pal.is_light else '400'}; color: {pal.text_mono}; background: transparent;"
+            )
+        self.ed_out_dir.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px;")
+        self.lbl_frame_num.setStyleSheet(
+            f"color: {pal.text_secondary}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; background: transparent;"
+        )
+        self.lbl_zoom_val.setStyleSheet(
+            f"color: {pal.text_secondary}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; background: transparent;"
+        )
+        if pal.is_light:
+            self.sb_enc.setStyleSheet("color: #217BE0; font-weight: 600;")
+            self.sb_state.setStyleSheet("color: #D84D88; font-weight: 600;")
+        else:
+            self.sb_enc.setStyleSheet("")
+            self.sb_state.setStyleSheet("")
+
+        # Re-tint vector icons for current theme
+        for btn, kind in self._tool_btn_specs:
+            if btn is self.btn_play:
+                btn.setIcon(make_icon("pause" if self._playing else "play", pal.icon_color, 14))
+            elif btn is self.btn_mute:
+                ic_col = pal.accent_danger if (self._muted and pal.is_light) else pal.icon_color
+                btn.setIcon(make_icon("volume_off" if self._muted else "volume_on", ic_col, 14))
+            else:
+                btn.setIcon(make_icon(kind, pal.icon_color, 14))
+
+        # Custom painted widgets
+        self.viewport.apply_theme()
+        self.vu_meter.update()
+        self.timeline.update()
+        self.btn_red_picker.update()
+        self.btn_blue_picker.update()
+        for sp in (self.main_split, self.vert_split):
+            for idx in range(1, sp.count()):
+                sp.handle(idx).update()
+        self.update()
+
     # ------------------------------------------------------------------ Live Language Switching
     def _switch_language(self, lang_code: str) -> None:
         chosen = set_language(lang_code, persist=True)
@@ -2168,11 +2658,15 @@ class MainWindow(QMainWindow):
         self.m_seq.setTitle(tr("menu.seq"))
         self.act_prev.setText(tr("menu.prev_build"))
         self.act_prev_force.setText(tr("menu.prev_rebuild"))
+        self.act_proxy_cfg.setText(tr("menu.proxy_cfg"))
         self.act_seq_cfg.setText(tr("menu.open_seq_tab"))
         self.act_clear_cache.setText(tr("menu.clear_cache"))
 
         self.m_view.setTitle(tr("menu.view"))
         self.act_toggle_inspector.setText(tr("menu.toggle_inspector"))
+        self.m_theme.setTitle(tr("menu.theme"))
+        self._theme_actions["dark"].setText(tr("menu.theme_dark"))
+        self._theme_actions["pastel_light"].setText(tr("menu.theme_light"))
         self.act_zi.setText(tr("menu.zoom_in"))
         self.act_zo.setText(tr("menu.zoom_out"))
         self.act_zf.setText(tr("menu.zoom_fit"))
@@ -2189,10 +2683,12 @@ class MainWindow(QMainWindow):
         self.act_upd.setText(tr("menu.check_upd"))
         self.act_about.setText(tr("menu.about"))
 
+        for hdr in self._pane_headers:
+            hdr.retranslate_ui()
+
         # Viewer & Inspector headers / tabs / labels
         if self.level_path:
             self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
-            self.lbl_vp_mode.setText(tr("vp.mode_fit") if self.viewport.has_video() else tr("vp.mode_none"))
             if not self.viewport.has_video() and self.level_info:
                 detail = tr(
                     "vp.level_detail",
@@ -2204,7 +2700,7 @@ class MainWindow(QMainWindow):
                 self.viewport.set_level_placeholder(self.level_info.display_title, detail)
         else:
             self.lbl_vp_title.setText(tr("vp.header"))
-            self.lbl_vp_mode.setText(tr("vp.mode_fit"))
+        self._update_vp_mode_label()
         self.viewport.retranslate_ui()
 
         self.lbl_insp_hdr.setText(tr("insp.header"))
@@ -2215,6 +2711,12 @@ class MainWindow(QMainWindow):
         self.spn_fps.setToolTip(tr("insp.fps_tip"))
         self.lbl_k_fmt.setText(tr("insp.fmt"))
         self.lbl_k_codec.setText(tr("insp.codec"))
+        self.lbl_k_bitrate.setText(tr("insp.bitrate"))
+        self.cmb_bitrate.blockSignals(True)
+        self.cmb_bitrate.setItemText(0, tr("insp.br_high"))
+        self.cmb_bitrate.setItemText(1, tr("insp.br_mid"))
+        self.cmb_bitrate.setItemText(2, tr("insp.br_low"))
+        self.cmb_bitrate.blockSignals(False)
         self.lbl_k_audio.setText(tr("insp.audio"))
         self.chk_bgm.setText(tr("insp.bgm"))
         self.chk_hit.setText(tr("insp.hitsound"))

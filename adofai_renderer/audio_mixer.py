@@ -420,5 +420,5 @@ def mix_audio_from_timeline(
 
     _write_wav_pcm16(output_wav_path, mix, sr)
     if log_cb:
-        log_cb(f"오디오 오프라인 믹싱 완료: {duration_sec:.2f}초, 타격음/효과음 {mixed_events}개 합성")
+        log_cb(f"오디오 오프라인 믹싱 완료: {duration_sec:.2f}초, 히트사운드/효과음 {mixed_events}개 합성")
     return True

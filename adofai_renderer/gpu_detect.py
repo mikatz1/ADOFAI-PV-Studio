@@ -344,11 +344,11 @@ def build_ffmpeg_video_args(
     fps: int,
     output_path: str,
     encoder: str,
-    quality: str = "high",  # "ultra", "high", "balanced"
+    quality: str = "high",  # "ultra" (High bitrate), "high" (Medium bitrate), "balanced" (Low bitrate)
     max_cpu_cores: int = 0, # 0 = auto, >0 = explicit FFmpeg -threads N
 ) -> str:
     """Build FFmpeg CLI argument string for streaming raw RGBA frames -> encoded video-only file."""
-    cq_map = {"ultra": 15, "high": 19, "balanced": 23}
+    cq_map = {"ultra": 15, "high": 19, "balanced": 24}
     cq = cq_map.get(quality, 19)
 
     is_mkv = output_path.lower().endswith(".mkv")
@@ -393,14 +393,15 @@ def build_ffmpeg_preview_args(
     output_path: str,
     encoder: str = "libx264",
 ) -> str:
-    """Build fast, seek-friendly FFmpeg args for rough thumbnail preview generation."""
+    """Build fast, seek-friendly FFmpeg args for proxy video generation (144p..720p, 5..60fps)."""
     gop = max(2, fps)
+    cq = 26 if height >= 480 else 28
     if encoder == "h264_nvenc":
         in_pix = "rgb0"
-        enc_opts = f"-c:v h264_nvenc -preset p1 -rc vbr -cq 30 -b:v 0 -g {gop}"
+        enc_opts = f"-c:v h264_nvenc -preset p1 -rc vbr -cq {cq} -b:v 0 -g {gop}"
     else:
         in_pix = "rgba"
-        enc_opts = f"-c:v libx264 -preset ultrafast -crf 30 -g {gop} -pix_fmt yuv420p"
+        enc_opts = f"-c:v libx264 -preset ultrafast -crf {cq} -g {gop} -pix_fmt yuv420p"
 
     quoted_out = output_path.replace('"', '\\"')
     return (

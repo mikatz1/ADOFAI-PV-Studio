@@ -26,16 +26,8 @@ from PySide6.QtWidgets import (
 from ..i18n import tr
 from ..render_runner import RenderProgress, RenderResult, RenderRunner, RenderSettings
 from .theme import (
-    ACCENT_PRIMARY,
-    ACCENT_STATUS_BLUE,
-    BG_CONSOLE,
-    BG_PANEL,
-    BORDER_DEFAULT,
-    BORDER_SUBTLE,
-    TEXT_MUTED,
-    TEXT_PRIMARY,
-    TEXT_SECONDARY,
     format_duration_korean,
+    get_palette,
 )
 
 
@@ -83,28 +75,29 @@ class ClaudeSpinnerGlyph(QWidget):
         self.update()
 
     def paintEvent(self, _ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         cx, cy = self.width() / 2.0, self.height() / 2.0
 
         if self._state == "done":
-            p.setPen(QPen(QColor("#6ab07c"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setPen(QPen(QColor(pal.accent_success), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.drawLine(QPointF(cx - 4.5, cy + 0.5), QPointF(cx - 1.2, cy + 3.8))
             p.drawLine(QPointF(cx - 1.2, cy + 3.8), QPointF(cx + 5.0, cy - 3.5))
             p.end()
             return
 
         if self._state == "error":
-            p.setPen(QPen(QColor("#d9534f"), 2.0, Qt.SolidLine, Qt.RoundCap))
+            p.setPen(QPen(QColor(pal.accent_danger), 2.0, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(QPointF(cx - 4.0, cy - 4.0), QPointF(cx + 4.0, cy + 4.0))
             p.drawLine(QPointF(cx + 4.0, cy - 4.0), QPointF(cx - 4.0, cy + 4.0))
             p.end()
             return
 
-        # Breathing starburst spinner cycle: dot -> 4-ray -> 6-ray -> 8-ray -> 6-ray -> 4-ray (studio blue)
+        # Breathing starburst spinner cycle: dot -> 4-ray -> 6-ray -> 8-ray -> 6-ray -> 4-ray
         step_map = [0, 4, 6, 8, 8, 6, 4, 6, 8, 8, 6, 4]
         rays = step_map[self._phase]
-        col = QColor(ACCENT_STATUS_BLUE)
+        col = QColor(pal.accent_status_blue)
 
         if rays == 0:
             p.setPen(Qt.NoPen)
@@ -152,14 +145,21 @@ class ClaudeConsoleBar(QFrame):
 
     def __init__(self, optimize_render: bool = False, start_sec: float = 0.0, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        pal = get_palette()
         self._optimize_render = optimize_render
         self._start_sec = start_sec
         self.setObjectName("claudeConsoleBar")
         self.setFixedHeight(40)
-        self.setStyleSheet(
-            f"QFrame#claudeConsoleBar {{ background-color: {BG_CONSOLE}; "
-            f"border: 1px solid #262626; border-radius: 4px; }}"
-        )
+        if pal.is_light:
+            self.setStyleSheet(
+                f"QFrame#claudeConsoleBar {{ background-color: {pal.console_bg}; "
+                f"border: 1px solid {pal.console_border}; border-left: 3px solid {pal.accent_primary}; border-radius: 6px; }}"
+            )
+        else:
+            self.setStyleSheet(
+                f"QFrame#claudeConsoleBar {{ background-color: {pal.console_bg}; "
+                f"border: 1px solid {pal.console_border}; border-radius: 4px; }}"
+            )
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 0, 12, 0)
@@ -170,14 +170,14 @@ class ClaudeConsoleBar(QFrame):
 
         self.lbl_verb = QLabel(tr("rc.v_launching"))
         self.lbl_verb.setStyleSheet(
-            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
+            f"color: {pal.accent_status_blue}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; font-weight: 600; background: transparent;"
         )
         lay.addWidget(self.lbl_verb)
 
         self.lbl_meta = QLabel(f"(0s · {tr('rc.h_launching')} · {tr('rc.esc_cancel')})")
         self.lbl_meta.setStyleSheet(
-            f"color: #8c8c8c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
+            f"color: {pal.console_meta}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; background: transparent;"
         )
         lay.addWidget(self.lbl_meta, 1)
@@ -192,6 +192,7 @@ class ClaudeConsoleBar(QFrame):
         active: bool,
         song_sec: float = 0.0,
     ) -> None:
+        pal = get_palette()
         vkey = self.STAGE_VERB_KEYS.get(stage, "rc.v_working")
         if stage == "loading_level" and self._optimize_render:
             vkey = "rc.v_loading_level_opt"
@@ -200,22 +201,22 @@ class ClaudeConsoleBar(QFrame):
             if stage == "completed":
                 self.spinner.set_state("done")
                 self.lbl_verb.setStyleSheet(
-                    "color: #6ab07c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
-                    "font-size: 12px; font-weight: 600; background: transparent;"
+                    f"color: {pal.accent_success}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
+                    f"font-size: 12px; font-weight: 600; background: transparent;"
                 )
                 self.lbl_meta.setText(f"({int(elapsed_s)}s · {tr('rc.frames_done', n=frames)})")
             else:
                 self.spinner.set_state("error")
                 self.lbl_verb.setStyleSheet(
-                    "color: #d9534f; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
-                    "font-size: 12px; font-weight: 600; background: transparent;"
+                    f"color: {pal.accent_danger}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
+                    f"font-size: 12px; font-weight: 600; background: transparent;"
                 )
                 self.lbl_meta.setText(f"({int(elapsed_s)}s · {tr('rc.stopped_word')})")
             return
 
         self.spinner.set_state("active")
         self.lbl_verb.setStyleSheet(
-            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
+            f"color: {pal.accent_status_blue}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; font-weight: 600; background: transparent;"
         )
         parts = [f"{int(elapsed_s)}s"]
@@ -305,6 +306,7 @@ class RenderCardDialog(QDialog):
         )
         root.addWidget(self.console_bar)
 
+        pal = get_palette()
         # Progress bar
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -312,8 +314,8 @@ class RenderCardDialog(QDialog):
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(9)
         self.progress.setStyleSheet(
-            f"QProgressBar {{ background: #131313; border: 1px solid #2b2b2b; border-radius: 3px; }}"
-            f"QProgressBar::chunk {{ background: {ACCENT_STATUS_BLUE}; border-radius: 2px; }}"
+            f"QProgressBar {{ background: {pal.prog_bg}; border: 1px solid {pal.prog_border}; border-radius: 4px; }}"
+            f"QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {pal.prog_chunk_start}, stop:1 {pal.prog_chunk_end}); border-radius: 3px; }}"
         )
         root.addWidget(self.progress)
 
@@ -339,12 +341,13 @@ class RenderCardDialog(QDialog):
         # Collapsible console log drawer
         self.txt_log = QPlainTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setFixedHeight(140)
+        self.txt_log.setMaximumHeight(0)
         self.txt_log.setStyleSheet(
-            f"background-color: {BG_CONSOLE}; border: 1px solid {BORDER_SUBTLE}; "
-            f"font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: #a8a8a8;"
+            f"background-color: {pal.log_bg}; border: 1px solid {pal.border_subtle}; "
+            f"font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: {pal.log_fg};"
         )
         self.txt_log.hide()
+        self._log_expanded = False
         root.addWidget(self.txt_log)
 
         # Footer controls
@@ -368,14 +371,15 @@ class RenderCardDialog(QDialog):
         root.addLayout(btn_row)
 
     def _add_metric(self, parent_lay: QHBoxLayout, label: str, value: str, accent: bool = False) -> QLabel:
+        pal = get_palette()
         col = QVBoxLayout()
         col.setSpacing(2)
         lk = QLabel(label)
-        lk.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        lk.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; background: transparent;")
         lv = QLabel(value)
-        color = ACCENT_STATUS_BLUE if accent else TEXT_PRIMARY
+        color = (pal.accent_pink if pal.is_light else pal.accent_status_blue) if accent else pal.text_primary
         lv.setStyleSheet(
-            f"color: {color}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 14px; font-weight: 600;"
+            f"color: {color}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 14px; font-weight: 700; background: transparent;"
         )
         col.addWidget(lk)
         col.addWidget(lv)
@@ -383,20 +387,38 @@ class RenderCardDialog(QDialog):
         return lv
 
     def _add_vsep(self, parent_lay: QHBoxLayout) -> None:
+        pal = get_palette()
         line = QFrame()
         line.setFixedWidth(1)
-        line.setStyleSheet(f"background-color: {BORDER_SUBTLE};")
+        line.setStyleSheet(f"background-color: {pal.sep_color};")
         parent_lay.addWidget(line)
 
     def _toggle_log(self) -> None:
-        if self.txt_log.isVisible():
-            self.txt_log.hide()
+        if getattr(self, "_log_anim", None) is not None:
+            self._log_anim.stop()
+        if self._log_expanded:
+            self._log_expanded = False
             self.btn_log.setText(tr("rc.btn_log_show"))
-            self.resize(self.width(), 290)
+            anim = QPropertyAnimation(self.txt_log, b"maximumHeight", self)
+            anim.setDuration(160)
+            anim.setStartValue(self.txt_log.maximumHeight())
+            anim.setEndValue(0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.finished.connect(lambda: (self.txt_log.hide(), self.resize(self.width(), 290)))
+            self._log_anim = anim
+            anim.start()
         else:
-            self.txt_log.show()
+            self._log_expanded = True
             self.btn_log.setText(tr("rc.btn_log_hide"))
+            self.txt_log.show()
             self.resize(self.width(), 440)
+            anim = QPropertyAnimation(self.txt_log, b"maximumHeight", self)
+            anim.setDuration(175)
+            anim.setStartValue(self.txt_log.maximumHeight())
+            anim.setEndValue(140)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._log_anim = anim
+            anim.start()
 
     def _start_worker(self) -> None:
         self._worker = RenderWorker(self.runner, self.settings)
@@ -450,11 +472,12 @@ class RenderCardDialog(QDialog):
         elapsed = time.monotonic() - self._started_mono
 
         if res.success:
+            pal = get_palette()
             self.setWindowTitle(tr("rc.title_done"))
             self.progress.setValue(1000)
             self.progress.setStyleSheet(
-                "QProgressBar { background: #131313; border: 1px solid #2b2b2b; border-radius: 3px; }"
-                "QProgressBar::chunk { background: #5a9e6f; border-radius: 2px; }"
+                f"QProgressBar {{ background: {pal.prog_bg}; border: 1px solid {pal.prog_border}; border-radius: 4px; }}"
+                f"QProgressBar::chunk {{ background: {pal.accent_success}; border-radius: 3px; }}"
             )
             self.console_bar.update_console("completed", elapsed, res.frames, res.frames, 0.0, active=False)
             self.lbl_pct.setText("100.0%")

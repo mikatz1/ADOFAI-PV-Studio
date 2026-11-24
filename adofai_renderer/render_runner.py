@@ -30,6 +30,79 @@ AGENT_BUILD_SCRIPT = os.path.join(get_bundle_root(), "agent", "build.ps1")
 CACHE_ROOT = os.path.join(get_data_root(), "cache")
 PREVIEW_CACHE_DIR = os.path.join(CACHE_ROOT, "previews")
 PERF_PROFILE_PATH = os.path.join(CACHE_ROOT, "perf_profile.json")
+PROXY_SETTINGS_PATH = os.path.join(CACHE_ROOT, "proxy_settings.json")
+
+PROXY_RES_PRESETS: List[Tuple[str, int, int]] = [
+    ("256 × 144  (144p)", 256, 144),
+    ("426 × 240  (240p)", 426, 240),
+    ("480 × 270  (270p)", 480, 270),
+    ("640 × 360  (360p)", 640, 360),
+    ("854 × 480  (480p)", 854, 480),
+    ("1280 × 720 (720p HD)", 1280, 720),
+]
+
+DEFAULT_PROXY_WIDTH = 480
+DEFAULT_PROXY_HEIGHT = 270
+DEFAULT_PROXY_FPS = 12
+
+
+def clamp_proxy_spec(width: int, height: int, fps: int) -> Tuple[int, int, int]:
+    """Clamp proxy dimensions to even 144p..720p bounds and FPS to 5..60."""
+    w = max(256, min(1280, int(width or DEFAULT_PROXY_WIDTH)))
+    h = max(144, min(720, int(height or DEFAULT_PROXY_HEIGHT)))
+    w = w - (w % 2)
+    h = h - (h % 2)
+    f = max(5, min(60, int(fps or DEFAULT_PROXY_FPS)))
+    return w, h, f
+
+
+def load_proxy_settings() -> dict:
+    try:
+        if os.path.isfile(PROXY_SETTINGS_PATH):
+            with open(PROXY_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            w, h, fps = clamp_proxy_spec(
+                data.get("width", DEFAULT_PROXY_WIDTH),
+                data.get("height", DEFAULT_PROXY_HEIGHT),
+                data.get("fps", DEFAULT_PROXY_FPS),
+            )
+            return {"width": w, "height": h, "fps": fps}
+    except Exception:
+        pass
+    return {"width": DEFAULT_PROXY_WIDTH, "height": DEFAULT_PROXY_HEIGHT, "fps": DEFAULT_PROXY_FPS}
+
+
+def save_proxy_settings(width: int, height: int, fps: int) -> dict:
+    w, h, f = clamp_proxy_spec(width, height, fps)
+    state = {"width": w, "height": h, "fps": f}
+    try:
+        os.makedirs(CACHE_ROOT, exist_ok=True)
+        with open(PROXY_SETTINGS_PATH, "w", encoding="utf-8") as fp:
+            json.dump(state, fp, indent=2)
+    except Exception:
+        pass
+    return state
+
+
+def compute_preview_cache_key(
+    level_path: str,
+    red_color: str,
+    red_opacity: float,
+    blue_color: str,
+    blue_opacity: float,
+    proxy_width: int = DEFAULT_PROXY_WIDTH,
+    proxy_height: int = DEFAULT_PROXY_HEIGHT,
+    proxy_fps: int = DEFAULT_PROXY_FPS,
+) -> str:
+    abs_lvl = os.path.abspath(level_path)
+    st = os.stat(abs_lvl)
+    pw, ph, pf = clamp_proxy_spec(proxy_width, proxy_height, proxy_fps)
+    key_src = (
+        f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|"
+        f"{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|"
+        f"{pw}x{ph}@{pf}|v6"
+    )
+    return hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
 
 
 def _fix_timeline_output_fps(timeline_path: str, out_fps: float) -> None:
@@ -202,7 +275,7 @@ def _save_bitrate_sample(
         measured_mbps = (file_bytes * 8.0) / (video_sec * 1_000_000.0)
         px_ratio = max(0.2, (width * height) / float(1920 * 1080))
         fps_ratio = max(0.2, fps / 60.0)
-        q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.62}.get(quality, 1.0)
+        q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.52}.get(quality, 1.0)
         codec_mult = 0.72 if codec == "hevc" else 1.0
         denom = (px_ratio ** 1.12) * (fps_ratio ** 0.78) * q_mult * codec_mult
         norm_1080p60 = max(10.0, min(36.0, max(0.5, measured_mbps - 0.32) / max(0.05, denom)))
@@ -224,7 +297,7 @@ def estimate_output_size_mb(
     dur = max(0.5, float(clip_dur_sec or 0.0))
     px_ratio = (settings.width * settings.height) / float(1920 * 1080)
     fps_ratio = settings.fps / 60.0
-    q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.62}.get(settings.quality, 1.0)
+    q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.52}.get(settings.quality, 1.0)
     codec_mult = 0.72 if settings.codec == "hevc" else 1.0
 
     # Empirically calibrated baseline: 18.0 Mbps at 1080p60 H.264 CQ19 (~85 Mbps base at 4K60)
@@ -717,7 +790,7 @@ class RenderRunner:
             frames=last_frames,
             video_sec=last_video_sec,
             percent=97.0,
-            message="원곡 + 실제 인게임 타격음 오프라인 정밀 믹싱 중...",
+            message="원곡 + 실제 인게임 히트사운드 오프라인 정밀 믹싱 중...",
         ))
         has_audio = False
         _fix_timeline_output_fps(audio_timeline_path, float(settings.fps))
@@ -842,17 +915,21 @@ class RenderRunner:
         force_rebuild: bool = False,
         progress_cb: Optional[Callable[[RenderProgress], None]] = None,
         log_cb: Optional[Callable[[str], None]] = None,
+        proxy_width: int = DEFAULT_PROXY_WIDTH,
+        proxy_height: int = DEFAULT_PROXY_HEIGHT,
+        proxy_fps: int = DEFAULT_PROXY_FPS,
     ) -> PreviewResult:
-        """Pre-render a lightweight low-res / low-fps rough preview MP4 + timeline filmstrip for trim selection."""
+        """Pre-render a lightweight proxy MP4 + timeline filmstrip for trim selection (144p..720p, 5..60fps)."""
         self._cancel_event.clear()
         abs_lvl = os.path.abspath(level_path)
         if not os.path.isfile(abs_lvl):
             return PreviewResult(success=False, error="레벨 파일을 찾을 수 없습니다.")
 
+        pw, ph, out_fps = clamp_proxy_spec(proxy_width, proxy_height, proxy_fps)
         os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
-        st = os.stat(abs_lvl)
-        key_src = f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|v6"
-        h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
+        h = compute_preview_cache_key(
+            abs_lvl, red_color, red_opacity, blue_color, blue_opacity, pw, ph, out_fps
+        )
         out_mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip_jpg = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")
 
@@ -870,12 +947,9 @@ class RenderRunner:
 
         agent_dll = self.ensure_agent_built(adofai_dir, log_cb)
 
-        # Rough preview specs: 480x270 (16:9 thumbnail), simulated at 12fps and captured every frame => 12fps rough video
-        # (half the simulation steps of the previous 24fps/stride-2 setup for the same output frame rate)
-        pw, ph = 480, 270
-        sim_fps = 12
-        stride = 1
-        out_fps = sim_fps // stride  # 12 fps
+        # Keep simulation rate >= 10fps via captureStride=2 for very low proxy FPS (5..9fps) so tile stepping stays accurate
+        stride = 2 if out_fps < 10 else 1
+        sim_fps = out_fps * stride
 
         work_dir = os.path.join(CACHE_ROOT, "jobs", f"preview_{h}_{os.getpid()}")
         os.makedirs(work_dir, exist_ok=True)
@@ -934,9 +1008,9 @@ class RenderRunner:
                 user_cb(p)
 
         if log_cb:
-            log_cb(f"사전 미리보기 생성 중 ({pw}x{ph} · {out_fps}fps Rough Thumbnail)...")
+            log_cb(f"프록시 생성 중 ({pw}x{ph} · {out_fps}fps Proxy)...")
         if progress_cb:
-            progress_cb(RenderProgress(stage="launching", message="미리보기 썸네일 렌더 시작 중..."))
+            progress_cb(RenderProgress(stage="launching", message=f"프록시 렌더 시작 중 ({pw}×{ph} · {out_fps}fps)..."))
 
         stage, _frames, vsec, _rfps = self._run_unity_pass(
             adofai_dir=adofai_dir,
@@ -952,7 +1026,7 @@ class RenderRunner:
         )
 
         if self._cancel_event.is_set() or stage == "cancelled":
-            return PreviewResult(success=False, error="미리보기 생성이 취소되었습니다.")
+            return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
 
         # Safe CPU fallback retry if HW preview encoder failed
         if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
@@ -979,13 +1053,13 @@ class RenderRunner:
                 )
 
         if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
-            return PreviewResult(success=False, error=f"미리보기 영상 생성 실패 (stage={stage})")
+            return PreviewResult(success=False, error=f"프록시 영상 생성 실패 (stage={stage})")
 
-        # Reject truncated previews (interrupted run): must cover (almost) the whole level
+        # Reject truncated proxies (interrupted run): must cover (almost) the whole level
         if seen["est"] > 5.0 and vsec > 0 and vsec < seen["est"] - 3.0:
             return PreviewResult(
                 success=False,
-                error=f"미리보기 생성이 중간에 중단되었습니다 ({vsec:.0f}s / {seen['est']:.0f}s). 다시 생성해 주세요.",
+                error=f"프록시 생성이 중간에 중단되었습니다 ({vsec:.0f}s / {seen['est']:.0f}s). 다시 생성해 주세요.",
             )
 
         # Mux BGM-only audio cleanly onto rough preview so scrubbing/playback matches song timing

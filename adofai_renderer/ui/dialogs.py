@@ -7,8 +7,8 @@ import math
 import os
 from typing import Optional
 
-from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QRadialGradient
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -32,18 +32,19 @@ from PySide6.QtWidgets import (
 from ..gpu_detect import HardwareCapabilities, resolve_video_encoder
 from ..i18n import tr
 from ..level_info import AdofaiLevelInfo
-from ..render_runner import RenderSettings, estimate_render_time_sec
+from ..render_runner import (
+    DEFAULT_PROXY_FPS,
+    DEFAULT_PROXY_HEIGHT,
+    DEFAULT_PROXY_WIDTH,
+    PROXY_RES_PRESETS,
+    RenderSettings,
+    clamp_proxy_spec,
+    estimate_render_time_sec,
+)
 from .theme import (
-    ACCENT_WARM,
-    BG_CANVAS,
-    BG_PANEL,
-    BORDER_DEFAULT,
-    BORDER_SUBTLE,
-    TEXT_MUTED,
-    TEXT_PRIMARY,
-    TEXT_SECONDARY,
     format_duration_korean,
     format_timecode,
+    get_palette,
 )
 
 RES_PRESETS = [
@@ -57,12 +58,31 @@ RES_PRESETS = [
 def _animate_dialog_in(dlg: QDialog) -> None:
     dlg.setWindowOpacity(0.0)
     anim = QPropertyAnimation(dlg, b"windowOpacity", dlg)
-    anim.setDuration(150)
+    anim.setDuration(165)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
     anim.setEasingCurve(QEasingCurve.OutCubic)
     anim.start()
     dlg._fade_anim = anim  # type: ignore[attr-defined]
+
+    def _glide() -> None:
+        try:
+            if not dlg.isVisible():
+                return
+            end_pos = dlg.pos()
+            start_pos = end_pos + QPoint(0, 8)
+            dlg.move(start_pos)
+            slide = QPropertyAnimation(dlg, b"pos", dlg)
+            slide.setDuration(165)
+            slide.setStartValue(start_pos)
+            slide.setEndValue(end_pos)
+            slide.setEasingCurve(QEasingCurve.OutCubic)
+            slide.start()
+            dlg._slide_anim = slide  # type: ignore[attr-defined]
+        except RuntimeError:
+            pass
+
+    QTimer.singleShot(0, _glide)
 
 
 class _PlanetPreviewCanvas(QWidget):
@@ -84,22 +104,27 @@ class _PlanetPreviewCanvas(QWidget):
         self.update()
 
     def paintEvent(self, _ev) -> None:
+        pal = get_palette()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         rect = self.rect().adjusted(0, 0, -1, -1)
-        p.fillRect(rect, QColor(BG_CANVAS))
+        p.fillRect(rect, QColor("#121A28" if pal.is_light else pal.bg_canvas))
 
         # Subtle checkerboard behind planets so opacity < 100% is clearly visible
+        p.save()
+        p.setClipRect(rect)
         cell = 12
+        chk_col = QColor("#182334" if pal.is_light else "#141414")
         for y in range(0, rect.height(), cell):
             for x in range(0, rect.width(), cell):
                 if ((x // cell) + (y // cell)) % 2 == 0:
-                    p.fillRect(x, y, cell, cell, QColor("#141414"))
+                    p.fillRect(x, y, cell, cell, chk_col)
+        p.restore()
 
         # Subtle ADOFAI tile track behind planets
         cx, cy = rect.width() / 2.0, rect.height() / 2.0
-        p.setPen(QPen(QColor("#383838"), 1))
-        p.setBrush(QColor("#242424"))
+        p.setPen(QPen(QColor("#3E5573" if pal.is_light else "#383838"), 1))
+        p.setBrush(QColor("#243347" if pal.is_light else "#242424"))
         p.drawRoundedRect(QRectF(cx - 110, cy - 16, 220, 32), 2, 2)
         for tx in (-75, -35, 5, 45, 85):
             p.drawLine(QPointF(cx + tx, cy - 16), QPointF(cx + tx, cy + 16))
@@ -116,7 +141,7 @@ class _PlanetPreviewCanvas(QWidget):
         self._draw_planet(p, QPointF(cx - 24 + r_orbit * math.cos(-0.45), cy + r_orbit * math.sin(-0.45)),
                           self.blue_hex, self.blue_alpha, is_orbiting=True)
 
-        p.setPen(QPen(QColor(BORDER_SUBTLE), 1))
+        p.setPen(QPen(QColor(pal.border_default if pal.is_light else pal.border_subtle), 1))
         p.setBrush(Qt.NoBrush)
         p.drawRect(rect)
         p.end()
@@ -218,9 +243,10 @@ class PlanetSettingsDialog(QDialog):
         grid.addWidget(self.sld_red_a, 1, 1, 1, 2)
         grid.addWidget(self.spn_red_a, 1, 3)
 
+        pal = get_palette()
         sep = QFrame()
         sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background: {BORDER_SUBTLE};")
+        sep.setStyleSheet(f"background: {pal.sep_color};")
         grid.addWidget(sep, 2, 0, 1, 4)
 
         # Blue planet (2)
@@ -268,8 +294,10 @@ class PlanetSettingsDialog(QDialog):
         root.addLayout(btn_row)
 
     def _sync_ui(self) -> None:
-        self.btn_red_swatch.setStyleSheet(f"background-color: {self.red_color}; border: 1px solid #555;")
-        self.btn_blue_swatch.setStyleSheet(f"background-color: {self.blue_color}; border: 1px solid #555;")
+        pal = get_palette()
+        rad = "border-radius: 5px;" if pal.is_light else ""
+        self.btn_red_swatch.setStyleSheet(f"background-color: {self.red_color}; border: 1px solid {pal.swatch_border}; {rad}")
+        self.btn_blue_swatch.setStyleSheet(f"background-color: {self.blue_color}; border: 1px solid {pal.swatch_border}; {rad}")
         if self.ed_red_hex.text().upper() != self.red_color:
             self.ed_red_hex.setText(self.red_color)
         if self.ed_blue_hex.text().upper() != self.blue_color:
@@ -311,8 +339,10 @@ class PlanetSettingsDialog(QDialog):
                 self.red_color = c.name().upper()
             else:
                 self.blue_color = c.name().upper()
-            self.btn_red_swatch.setStyleSheet(f"background-color: {self.red_color}; border: 1px solid #555;")
-            self.btn_blue_swatch.setStyleSheet(f"background-color: {self.blue_color}; border: 1px solid #555;")
+            pal = get_palette()
+            rad = "border-radius: 5px;" if pal.is_light else ""
+            self.btn_red_swatch.setStyleSheet(f"background-color: {self.red_color}; border: 1px solid {pal.swatch_border}; {rad}")
+            self.btn_blue_swatch.setStyleSheet(f"background-color: {self.blue_color}; border: 1px solid {pal.swatch_border}; {rad}")
             self.preview.set_planets(self.red_color, self.red_opacity, self.blue_color, self.blue_opacity)
 
     def _on_red_opacity(self, val: int) -> None:
@@ -409,6 +439,111 @@ class SequenceSettingsDialog(QDialog):
     def _reset_full(self) -> None:
         self.spn_start.setValue(0.0)
         self.spn_end.setValue(0.0)
+
+
+class ProxySettingsDialog(QDialog):
+    """Detailed proxy resolution (144p..720p) and frame rate (5..60 fps) configuration dialog."""
+
+    def __init__(
+        self,
+        width: int = DEFAULT_PROXY_WIDTH,
+        height: int = DEFAULT_PROXY_HEIGHT,
+        fps: int = DEFAULT_PROXY_FPS,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("proxy.title"))
+        self.setFixedWidth(440)
+        w, h, f = clamp_proxy_spec(width, height, fps)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 14)
+        root.setSpacing(12)
+
+        g = QGridLayout()
+        g.setSpacing(10)
+
+        g.addWidget(QLabel(tr("proxy.res")), 0, 0)
+        self.cmb_res = QComboBox()
+        for lbl, pw, ph in PROXY_RES_PRESETS:
+            self.cmb_res.addItem(lbl, (pw, ph))
+        self._select_res(w, h)
+        g.addWidget(self.cmb_res, 0, 1, 1, 2)
+
+        g.addWidget(QLabel(tr("proxy.fps")), 1, 0)
+        self.sld_fps = QSlider(Qt.Horizontal)
+        self.sld_fps.setRange(5, 60)
+        self.sld_fps.setValue(f)
+        self.spn_fps = QSpinBox()
+        self.spn_fps.setRange(5, 60)
+        self.spn_fps.setSuffix(" fps")
+        self.spn_fps.setValue(f)
+        self.spn_fps.setToolTip(tr("proxy.fps_tip"))
+        self.sld_fps.valueChanged.connect(self.spn_fps.setValue)
+        self.spn_fps.valueChanged.connect(self.sld_fps.setValue)
+        g.addWidget(self.sld_fps, 1, 1)
+        g.addWidget(self.spn_fps, 1, 2)
+
+        root.addLayout(g)
+
+        # Quick preset chips
+        q_lbl = QLabel(tr("proxy.quick"))
+        q_lbl.setObjectName("muted")
+        root.addWidget(q_lbl)
+
+        preset_grid = QGridLayout()
+        preset_grid.setSpacing(6)
+        presets = [
+            (tr("proxy.preset_ultra_fast"), 256, 144, 5),
+            (tr("proxy.preset_std"), 480, 270, 12),
+            (tr("proxy.preset_smooth"), 854, 480, 30),
+            (tr("proxy.preset_hd"), 1280, 720, 60),
+        ]
+        for idx, (label, pw, ph, pfps) in enumerate(presets):
+            b = QPushButton(label)
+            b.setObjectName("chipBtn")
+            b.clicked.connect(lambda _=False, _w=pw, _h=ph, _f=pfps: self._apply_preset(_w, _h, _f))
+            preset_grid.addWidget(b, idx // 2, idx % 2)
+        root.addLayout(preset_grid)
+
+        note = QLabel(tr("proxy.note"))
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        root.addWidget(note)
+
+        btn_row = QHBoxLayout()
+        btn_def = QPushButton(tr("btn.restore_defaults"))
+        btn_def.clicked.connect(lambda: self._apply_preset(DEFAULT_PROXY_WIDTH, DEFAULT_PROXY_HEIGHT, DEFAULT_PROXY_FPS))
+        btn_cancel = QPushButton(tr("btn.cancel"))
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton(tr("btn.apply"))
+        btn_ok.setObjectName("primaryBtn")
+        btn_ok.clicked.connect(self.accept)
+        btn_row.addWidget(btn_def)
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        root.addLayout(btn_row)
+        _animate_dialog_in(self)
+
+    def _select_res(self, w: int, h: int) -> None:
+        best_idx = 2
+        best_dist = 10**9
+        for i in range(self.cmb_res.count()):
+            pw, ph = self.cmb_res.itemData(i)
+            d = abs(ph - h) + abs(pw - w)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        self.cmb_res.setCurrentIndex(best_idx)
+
+    def _apply_preset(self, w: int, h: int, fps: int) -> None:
+        self._select_res(w, h)
+        self.spn_fps.setValue(fps)
+
+    def result_spec(self) -> tuple[int, int, int]:
+        pw, ph = self.cmb_res.currentData()
+        return clamp_proxy_spec(pw, ph, self.spn_fps.value())
 
 
 class ExportSettingsDialog(QDialog):
@@ -512,22 +647,13 @@ class ExportSettingsDialog(QDialog):
 
         tabs.addTab(t_hw, tr("exp.tab_hw"))
 
-        # Tab 2: Encoding Quality & Audio Mixing (non-overlapping with main Output panel)
+        # Tab 2: Audio Mixing (non-overlapping with main Output panel's video bitrate/codec controls)
         t_qa = QWidget()
         gq = QGridLayout(t_qa)
         gq.setContentsMargins(14, 14, 14, 14)
         gq.setSpacing(10)
 
-        gq.addWidget(QLabel(tr("exp.qual_label")), 0, 0)
-        self.cmb_qual = QComboBox()
-        self.cmb_qual.addItem(tr("exp.qual_ultra"), "ultra")
-        self.cmb_qual.addItem(tr("exp.qual_high"), "high")
-        self.cmb_qual.addItem(tr("exp.qual_bal"), "balanced")
-        q_idx = {"ultra": 0, "high": 1, "balanced": 2}.get(self.state["quality"], 1)
-        self.cmb_qual.setCurrentIndex(q_idx)
-        gq.addWidget(self.cmb_qual, 0, 1, 1, 2)
-
-        gq.addWidget(QLabel(tr("exp.bgm_vol")), 1, 0)
+        gq.addWidget(QLabel(tr("exp.bgm_vol")), 0, 0)
         self.sld_bgm = QSlider(Qt.Horizontal)
         self.sld_bgm.setRange(0, 200)
         self.sld_bgm.setValue(int(round(self.state["bgm_volume"] * 100)))
@@ -537,10 +663,10 @@ class ExportSettingsDialog(QDialog):
         self.spn_bgm.setValue(int(round(self.state["bgm_volume"] * 100)))
         self.sld_bgm.valueChanged.connect(self.spn_bgm.setValue)
         self.spn_bgm.valueChanged.connect(self.sld_bgm.setValue)
-        gq.addWidget(self.sld_bgm, 1, 1)
-        gq.addWidget(self.spn_bgm, 1, 2)
+        gq.addWidget(self.sld_bgm, 0, 1)
+        gq.addWidget(self.spn_bgm, 0, 2)
 
-        gq.addWidget(QLabel(tr("exp.hit_vol")), 2, 0)
+        gq.addWidget(QLabel(tr("exp.hit_vol")), 1, 0)
         self.sld_hit = QSlider(Qt.Horizontal)
         self.sld_hit.setRange(0, 200)
         self.sld_hit.setValue(int(round(self.state["hitsound_volume"] * 100)))
@@ -550,18 +676,18 @@ class ExportSettingsDialog(QDialog):
         self.spn_hit.setValue(int(round(self.state["hitsound_volume"] * 100)))
         self.sld_hit.valueChanged.connect(self.spn_hit.setValue)
         self.spn_hit.valueChanged.connect(self.sld_hit.setValue)
-        gq.addWidget(self.sld_hit, 2, 1)
-        gq.addWidget(self.spn_hit, 2, 2)
+        gq.addWidget(self.sld_hit, 1, 1)
+        gq.addWidget(self.spn_hit, 1, 2)
 
-        gq.addWidget(QLabel(tr("exp.abit")), 3, 0)
+        gq.addWidget(QLabel(tr("exp.abit")), 2, 0)
         self.cmb_abit = QComboBox()
         for br in ("320k", "256k", "192k"):
             self.cmb_abit.addItem(f"AAC {br}", br)
         ab_idx = {"320k": 0, "256k": 1, "192k": 2}.get(self.state.get("audio_bitrate", "320k"), 0)
         self.cmb_abit.setCurrentIndex(ab_idx)
-        gq.addWidget(self.cmb_abit, 3, 1, 1, 2)
+        gq.addWidget(self.cmb_abit, 2, 1, 1, 2)
 
-        gq.setRowStretch(4, 1)
+        gq.setRowStretch(3, 1)
         tabs.addTab(t_qa, tr("exp.tab_qa"))
 
         root.addWidget(tabs)
@@ -581,7 +707,6 @@ class ExportSettingsDialog(QDialog):
         root.addLayout(btn_row)
 
     def _restore_defaults(self) -> None:
-        self.cmb_qual.setCurrentIndex(1)
         self.spn_bgm.setValue(100)
         self.spn_hit.setValue(100)
         self.cmb_abit.setCurrentIndex(0)
@@ -595,7 +720,6 @@ class ExportSettingsDialog(QDialog):
     def result_state(self) -> dict:
         out = dict(self.state)
         out.update({
-            "quality": self.cmb_qual.currentData(),
             "bgm_volume": self.spn_bgm.value() / 100.0,
             "hitsound_volume": self.spn_hit.value() / 100.0,
             "audio_bitrate": self.cmb_abit.currentData(),
@@ -640,20 +764,27 @@ class RenderConfirmDialog(QDialog):
         hdr.setFont(f)
         root.addWidget(hdr)
 
-        # ETA Highlight Banner (clean neutral dark box with warm left accent bar)
+        pal = get_palette()
+        # ETA Highlight Banner
         eta_box = QFrame()
-        eta_box.setStyleSheet(
-            f"QFrame {{ background-color: #161616; border: 1px solid {BORDER_DEFAULT}; "
-            f"border-left: 3px solid {ACCENT_WARM}; border-radius: 3px; }}"
-        )
+        if pal.is_light:
+            eta_box.setStyleSheet(
+                f"QFrame {{ background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #EEF7FF, stop:0.65 #FFFFFF, stop:1 #FFF2F8); "
+                f"border: 1px solid {pal.eta_box_border}; border-left: 4px solid {pal.accent_primary}; border-radius: 7px; }}"
+            )
+        else:
+            eta_box.setStyleSheet(
+                f"QFrame {{ background-color: {pal.eta_box_bg}; border: 1px solid {pal.eta_box_border}; "
+                f"border-left: 3px solid {pal.accent_status_blue}; border-radius: 3px; }}"
+            )
         eta_lay = QHBoxLayout(eta_box)
         eta_lay.setContentsMargins(12, 10, 12, 10)
         eta_left = QVBoxLayout()
         eta_left.setSpacing(2)
         lbl_eta_k = QLabel(tr("conf.est_time"))
-        lbl_eta_k.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; border: none;")
+        lbl_eta_k.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; border: none; background: transparent;")
         lbl_eta_v = QLabel(format_duration_korean(est_sec))
-        lbl_eta_v.setStyleSheet("color: #f0f0f0; font-size: 15px; font-weight: 600; border: none;")
+        lbl_eta_v.setStyleSheet(f"color: {pal.eta_val_fg}; font-size: 15px; font-weight: 700; border: none; background: transparent;")
         eta_left.addWidget(lbl_eta_k)
         eta_left.addWidget(lbl_eta_v)
 
@@ -662,12 +793,12 @@ class RenderConfirmDialog(QDialog):
         eta_right.setAlignment(Qt.AlignRight)
         lbl_clk_k = QLabel(tr("conf.est_clk"))
         lbl_clk_k.setAlignment(Qt.AlignRight)
-        lbl_clk_k.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; border: none;")
+        lbl_clk_k.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; border: none; background: transparent;")
         lbl_clk_v = QLabel(eta_dt.strftime("%H:%M:%S"))
         lbl_clk_v.setAlignment(Qt.AlignRight)
         lbl_clk_v.setStyleSheet(
-            f"color: {ACCENT_WARM}; font-family: 'Cascadia Mono', Consolas, monospace; "
-            f"font-size: 15px; font-weight: 600; border: none;"
+            f"color: {pal.accent_pink if pal.is_light else pal.accent_status_blue}; font-family: 'Cascadia Mono', Consolas, monospace; "
+            f"font-size: 15px; font-weight: 700; border: none; background: transparent;"
         )
         eta_right.addWidget(lbl_clk_k)
         eta_right.addWidget(lbl_clk_v)
@@ -723,24 +854,24 @@ class RenderConfirmDialog(QDialog):
         ]
         for r, (k, v, is_path) in enumerate(rows):
             lk = QLabel(k)
-            lk.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+            lk.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; background: transparent;")
             lk.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             lv = QLabel(v)
             if is_path:
                 fm = QFontMetrics(lv.font())
                 lv.setText(fm.elidedText(v, Qt.ElideMiddle, 360))
                 lv.setToolTip(v)
-                lv.setStyleSheet(f"color: {TEXT_PRIMARY}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
+                lv.setStyleSheet(f"color: {pal.text_primary}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; background: transparent;")
             else:
                 lv.setWordWrap(True)
-                lv.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px;")
+                lv.setStyleSheet(f"color: {pal.text_primary}; font-size: 12px; background: transparent;")
             grid.addWidget(lk, r, 0)
             grid.addWidget(lv, r, 1)
 
         # Planet color row with real color swatches
         row_p = len(rows)
         lk_p = QLabel(tr("conf.row_planets"))
-        lk_p.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        lk_p.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; background: transparent;")
         p_box = QHBoxLayout()
         p_box.setSpacing(8)
         for col_hex, op, name in (
@@ -749,9 +880,9 @@ class RenderConfirmDialog(QDialog):
         ):
             dot = QLabel()
             dot.setFixedSize(11, 11)
-            dot.setStyleSheet(f"background-color: {col_hex}; border: 1px solid #555; border-radius: 5px;")
+            dot.setStyleSheet(f"background-color: {col_hex}; border: 1px solid {pal.swatch_border}; border-radius: 5px;")
             txt = QLabel(f"{name} {col_hex.upper()} ({int(round(op*100))}%)")
-            txt.setStyleSheet("font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
+            txt.setStyleSheet(f"color: {pal.text_primary}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; background: transparent;")
             p_box.addWidget(dot)
             p_box.addWidget(txt)
         p_box.addStretch(1)
