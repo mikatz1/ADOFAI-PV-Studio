@@ -14,11 +14,21 @@ namespace AdofaiRenderAgent
         public static int TargetFps = 60;
         private static int _lastSteppedUnityFrame = -1;
         public static bool DspGetterPatched = false;
+        public static int LastConductorPostFrame = -1;
+        public static int DeferredPlayerControlCount = 0;
+
+        private static bool _runningDeferredPlayerControl = false;
+        private static scrController _deferredController = null;
+        private static int _deferredFrame = -1;
 
         private static readonly FieldInfo _fiLastReported =
             typeof(scrConductor).GetField("lastReportedPlayheadPosition", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo _fiPrevFrameTime =
             typeof(scrConductor).GetField("previousFrameTime", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly MethodInfo _miPlayerControlUpdate =
+            typeof(scrController).GetMethod("PlayerControl_Update", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly PropertyInfo _piPlayerChosenPlanet =
+            typeof(scrPlayer).GetProperty("chosenPlanet", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
         public static double Dt
         {
@@ -32,6 +42,11 @@ namespace AdofaiRenderAgent
             CurrentDsp = initialDsp;
             SimFrameIndex = 0;
             _lastSteppedUnityFrame = Time.frameCount;
+            LastConductorPostFrame = -1;
+            DeferredPlayerControlCount = 0;
+            _runningDeferredPlayerControl = false;
+            _deferredController = null;
+            _deferredFrame = -1;
             Active = true;
 
             Time.captureDeltaTime = 1.0f / (float)TargetFps;
@@ -95,7 +110,8 @@ namespace AdofaiRenderAgent
 
                 harmony.Patch(condUpdate,
                     new HarmonyMethod(typeof(VirtualClock).GetMethod("Conductor_Update_Prefix", BindingFlags.Static | BindingFlags.NonPublic)),
-                    null, null, null);
+                    new HarmonyMethod(typeof(VirtualClock).GetMethod("Conductor_Update_Postfix", BindingFlags.Static | BindingFlags.NonPublic)),
+                    null, null);
                 harmony.Patch(condStart,
                     null,
                     new HarmonyMethod(typeof(VirtualClock).GetMethod("Conductor_Reset_Postfix", BindingFlags.Static | BindingFlags.NonPublic)),
@@ -104,7 +120,13 @@ namespace AdofaiRenderAgent
                     null,
                     new HarmonyMethod(typeof(VirtualClock).GetMethod("Conductor_Reset_Postfix", BindingFlags.Static | BindingFlags.NonPublic)),
                     null, null);
-                AgentLog.Info("Patched scrConductor Update/Start/Rewind.");
+                if (_miPlayerControlUpdate != null)
+                {
+                    harmony.Patch(_miPlayerControlUpdate,
+                        new HarmonyMethod(typeof(VirtualClock).GetMethod("PlayerControl_Update_Prefix", BindingFlags.Static | BindingFlags.NonPublic)),
+                        null, null, null);
+                }
+                AgentLog.Info("Patched scrConductor Update/Start/Rewind + deterministic PlayerControl ordering.");
             }
             catch (Exception ex)
             {
@@ -127,6 +149,7 @@ namespace AdofaiRenderAgent
         {
             if (!Active) return;
             StepFrameOnce();
+            UiAndQualityPatches.EnsureZeroCalibrationFast();
             // Guarantee scrConductor uses exact VirtualClock.CurrentDsp even if AudioSettings.dspTime icall isn't patched
             // or if window loses focus.
             __instance.dspTime = CurrentDsp;
@@ -136,6 +159,85 @@ namespace AdofaiRenderAgent
                     _fiLastReported.SetValue(__instance, AudioSettings.dspTime);
                 if (_fiPrevFrameTime != null)
                     _fiPrevFrameTime.SetValue(__instance, Time.unscaledTimeAsDouble);
+            }
+        }
+
+        private static void RefreshAllChosenPlanetAngles()
+        {
+            try
+            {
+                scrPlayerManager pm = ADOBase.playerManager;
+                if (pm != null)
+                {
+                    foreach (scrPlayer pl in pm)
+                    {
+                        if (pl == null) continue;
+                        scrPlanet chosen = null;
+                        if (_piPlayerChosenPlanet != null)
+                            chosen = _piPlayerChosenPlanet.GetValue(pl, null) as scrPlanet;
+                        if (chosen != null)
+                            chosen.Update_RefreshAngles();
+                    }
+                    return;
+                }
+            }
+            catch { }
+
+            try
+            {
+                scrController ctrl = scrController.instance;
+                if (ctrl != null && ctrl.planetarySystem != null && ctrl.planetarySystem.chosenPlanet != null)
+                    ctrl.planetarySystem.chosenPlanet.Update_RefreshAngles();
+            }
+            catch { }
+        }
+
+        private static bool PlayerControl_Update_Prefix(scrController __instance)
+        {
+            if (!Active || _runningDeferredPlayerControl) return true;
+            int fc = Time.frameCount;
+            scrConductor cond = scrConductor.instance;
+            if (LastConductorPostFrame != fc && cond != null && cond.enabled && cond.gameObject.activeInHierarchy)
+            {
+                // scrController.Update ran before scrConductor.Update on this frame.
+                // Defer until Conductor_Update_Postfix so Auto-play checks THIS frame's songposition_minusi
+                // instead of lagging 1 frame behind (which causes visible planet overshoot past tiles at high BPM).
+                _deferredController = __instance;
+                _deferredFrame = fc;
+                DeferredPlayerControlCount++;
+                return false;
+            }
+            RefreshAllChosenPlanetAngles();
+            return true;
+        }
+
+        private static void Conductor_Update_Postfix(scrConductor __instance)
+        {
+            if (!Active) return;
+            int fc = Time.frameCount;
+            LastConductorPostFrame = fc;
+            if (_deferredController != null && _deferredFrame == fc && _miPlayerControlUpdate != null)
+            {
+                scrController ctrl = _deferredController;
+                _deferredController = null;
+                _deferredFrame = -1;
+                if (ctrl != null && ctrl.gameObject != null && ctrl.gameObject.activeInHierarchy)
+                {
+                    RefreshAllChosenPlanetAngles();
+                    _runningDeferredPlayerControl = true;
+                    try
+                    {
+                        _miPlayerControlUpdate.Invoke(ctrl, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        AgentLog.Warn("Deferred PlayerControl_Update error: " + ex.Message);
+                    }
+                    finally
+                    {
+                        _runningDeferredPlayerControl = false;
+                    }
+                }
             }
         }
 

@@ -263,6 +263,7 @@ namespace AdofaiRenderAgent
                 scrConductor.instance != null && scrCamera.instance != null)
             {
                 ParkUnityWindowOffscreen();
+                UiAndQualityPatches.ForceZeroCalibrationOffsets();
                 AgentLog.Info("scnGame loaded. Activating resolution override: " + Config.width + "x" + Config.height);
                 UiAndQualityPatches.ResolutionOverrideActive = true;
                 scrCamera.instance.forceRTCam = true;
@@ -364,6 +365,7 @@ namespace AdofaiRenderAgent
         private void UpdateStartingPlayback()
         {
             // Engage deterministic virtual clock BEFORE triggering start!
+            UiAndQualityPatches.ForceZeroCalibrationOffsets();
             double baseDsp = AudioSettings.dspTime;
             if (baseDsp < 10.0) baseDsp = 100.0;
             VirtualClock.Engage(Config.fps, baseDsp);
@@ -441,15 +443,9 @@ namespace AdofaiRenderAgent
                 _levelStartDsp = VirtualClock.CurrentDsp - (songpos + C);
                 AgentLog.Info(string.Format("Fast start re-base: songpos={0:F4} k={1:F4} C={2:F4} -> elapsed at schedule={3:F4}", songpos, k, C, songpos + C));
             }
-            try
-            {
-                scrConductor cd0 = scrConductor.instance;
-                AgentLog.Info(string.Format("PROBE music-scheduled: curDsp={0:F4} songpos_minusi={1:F4} dspTimeSong={2:F4} addoffset={3:F4} countdownTicks={4} crotchetAtStart={5:F5} cdSpeedMul={6} floor={7} ckpt={8}",
-                    VirtualClock.CurrentDsp, cd0.songposition_minusi, cd0.dspTimeSong, cd0.addoffset, cd0.countdownTicks, cd0.crotchetAtStart, cd0.countdownSpeedMultiplier, GetCurrentFloorIndex(), GCS.checkpointNum));
-            }
-            catch (Exception ex) { AgentLog.Warn("probe2: " + ex.Message); }
-            AgentLog.Info(string.Format("Music scheduled! levelStartDsp={0:F6}, dspTimeSong={1:F6}, songStartDsp={2:F6}",
-                _levelStartDsp, AudioTimelineExporter.DspTimeSong, AudioTimelineExporter.SongStartDsp));
+            AgentLog.Info(string.Format("Music scheduled! levelStartDsp={0:F6}, dspTimeSong={1:F6}, songStartDsp={2:F6}, cal_i={3:F3}s, cal_v={4:F3}s",
+                _levelStartDsp, AudioTimelineExporter.DspTimeSong, AudioTimelineExporter.SongStartDsp,
+                scrConductor.calibration_i, scrConductor.calibration_v));
 
             if (Config.startSec > 0.001f)
             {
@@ -517,42 +513,11 @@ namespace AdofaiRenderAgent
             _wonReached = false;
             _wonElapsedSec = 0.0;
             _captureSimTick = 0;
-            try
-            {
-                scrConductor cd = scrConductor.instance;
-                AgentLog.Info(string.Format("PROBE capture-begin: elapsed={0:F4} levelStartDsp={1:F4} curDsp={2:F4} songpos_minusi={3:F4} songpos_minusv={4:F4} floor={5}",
-                    VirtualClock.CurrentDsp - _levelStartDsp, _levelStartDsp, VirtualClock.CurrentDsp, cd.songposition_minusi, cd.songposition_minusv, GetCurrentFloorIndex()));
-                var lf = scrLevelMaker.instance.listFloors;
-                for (int i = 0; i < lf.Count; i += Math.Max(1, lf.Count / 12))
-                    AgentLog.Info(string.Format("PROBE floor{0}: entryTime={1:F4} entryTimePitchAdj={2:F4} afterExtra={3:F4}", i, lf[i].entryTime, lf[i].entryTimePitchAdj, lf[i].entryTimeAfterExtraBeats));
-            }
-            catch (Exception ex) { AgentLog.Warn("probe: " + ex.Message); }
             PlanetTailArc.Reset();
             PlanetTailArc.Enabled = Config.arcTails;
             AgentLog.Info("Entering Capturing stage.");
             ReportProgress("rendering", GetCurrentFloorIndex(), _totalFloors, 0.0, _estimatedTotalSec);
             TransitionTo(Stage.Capturing);
-        }
-
-        private void ProbePlanetTails()
-        {
-            try
-            {
-                scrController c = scrController.instance;
-                if (c == null || c.planetarySystem == null || c.planetarySystem.allPlanets == null) return;
-                foreach (scrPlanet p in c.planetarySystem.allPlanets)
-                {
-                    if (p == null || p.planetRenderer == null) continue;
-                    ParticleSystem ps = p.planetRenderer.tailParticles;
-                    if (ps == null) { AgentLog.Info("PROBE planet" + p.planetIndex + ": no tailParticles"); continue; }
-                    var m = ps.main; var e = ps.emission; var sh = ps.shape;
-                    AgentLog.Info(string.Format("PROBE planet{0}: space={1} life={2}/{3}/{4} speed={5} rateT={6} rateD={7} shape={8} maxP={9} simSpeed={10} unscaled={11} playing={12} startSpd={13} loop={14} scaleMode={15} customSim={16} tr={17}",
-                        p.planetIndex, m.simulationSpace, m.startLifetime.mode, m.startLifetime.constantMin, m.startLifetime.constantMax,
-                        m.startSpeed.constant, e.rateOverTime.constant, e.rateOverDistance.constant, sh.enabled, m.maxParticles,
-                        m.simulationSpeed, m.useUnscaledTime, ps.isPlaying, m.startSpeed.mode, m.loop, m.scalingMode, m.customSimulationSpace != null, ps.trails.enabled));
-                }
-            }
-            catch (Exception ex) { AgentLog.Warn("ProbePlanetTails: " + ex.Message); }
         }
 
         private void UpdateCapturing()

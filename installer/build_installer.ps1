@@ -37,7 +37,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "ISCC compilation failed with exit code $LASTEXITCODE"
 }
 
-$outExe = Join-Path $Root "dist\installer\ADOFAI_PV_Renderer_Setup_2.0.1.exe"
+$verMatch = Select-String -Path $issPath -Pattern '#define\s+MyAppVersion\s+"([^"]+)"' | Select-Object -First 1
+$appVer = if ($verMatch) { $verMatch.Matches[0].Groups[1].Value } else { "2.0.2" }
+$outExe = Join-Path $Root "dist\installer\ADOFAI_PV_Renderer_Setup_$appVer.exe"
 if (-not (Test-Path $outExe)) {
     throw "Expected installer was not created: $outExe"
 }

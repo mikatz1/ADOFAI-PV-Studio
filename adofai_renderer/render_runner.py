@@ -185,6 +185,77 @@ def _save_perf_sample(encoder: str, width: int, height: int, gpu_cap: int, measu
         pass
 
 
+def _save_bitrate_sample(
+    codec: str,
+    quality: str,
+    width: int,
+    height: int,
+    fps: int,
+    file_bytes: int,
+    video_sec: float,
+) -> None:
+    if video_sec < 8.0 or file_bytes <= 0:
+        return
+    try:
+        os.makedirs(CACHE_ROOT, exist_ok=True)
+        data = _load_perf_profile()
+        measured_mbps = (file_bytes * 8.0) / (video_sec * 1_000_000.0)
+        px_ratio = max(0.2, (width * height) / float(1920 * 1080))
+        fps_ratio = max(0.2, fps / 60.0)
+        q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.62}.get(quality, 1.0)
+        codec_mult = 0.72 if codec == "hevc" else 1.0
+        denom = (px_ratio ** 1.12) * (fps_ratio ** 0.78) * q_mult * codec_mult
+        norm_1080p60 = max(10.0, min(36.0, max(0.5, measured_mbps - 0.32) / max(0.05, denom)))
+        key = "norm_mbps_1080p60"
+        prev = float(data.get(key, 0.0) or 0.0)
+        data[key] = (prev * 0.55 + norm_1080p60 * 0.45) if prev > 1.0 else norm_1080p60
+        with open(PERF_PROFILE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def estimate_output_size_mb(
+    settings: RenderSettings,
+    level_info: object = None,
+    clip_dur_sec: float = 60.0,
+) -> float:
+    """Estimate output file size in MiB calibrated against real ADOFAI CQ/VBR renders (720p..4K)."""
+    dur = max(0.5, float(clip_dur_sec or 0.0))
+    px_ratio = (settings.width * settings.height) / float(1920 * 1080)
+    fps_ratio = settings.fps / 60.0
+    q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.62}.get(settings.quality, 1.0)
+    codec_mult = 0.72 if settings.codec == "hevc" else 1.0
+
+    # Empirically calibrated baseline: 18.0 Mbps at 1080p60 H.264 CQ19 (~85 Mbps base at 4K60)
+    # because crisp high-contrast vector tiles, text, and particle edges scale super-linearly in 4K CQ.
+    prof = _load_perf_profile()
+    learned = float(prof.get("norm_mbps_1080p60", 0.0) or 0.0)
+    base_1080p60 = (18.0 * 0.5 + max(12.0, min(32.0, learned)) * 0.5) if learned > 1.0 else 18.0
+
+    # Mild chart visual-complexity multiplier (0.85 .. 1.20)
+    complexity = 1.0
+    if level_info is not None:
+        deco = int(getattr(level_info, "decoration_count", 0) or 0)
+        filts = len(getattr(level_info, "filters", ()) or ())
+        acts = int(getattr(level_info, "action_count", 0) or 0)
+        deco_s = min(1.0, deco / 2500.0)
+        filt_s = min(1.0, filts / 12.0)
+        act_s = min(1.0, acts / 8000.0)
+        complexity = 0.85 + 0.13 * deco_s + 0.12 * filt_s + 0.10 * act_s
+
+    audio_mbps = 0.0
+    if settings.include_bgm or settings.include_hitsounds:
+        try:
+            audio_mbps = float(str(settings.audio_bitrate).lower().rstrip("k")) / 1000.0
+        except Exception:
+            audio_mbps = 0.32
+
+    video_mbps = base_1080p60 * (px_ratio ** 1.12) * (fps_ratio ** 0.78) * q_mult * codec_mult * complexity
+    total_bytes = ((video_mbps + audio_mbps) * 1_000_000.0 / 8.0) * dur
+    return total_bytes / (1024.0 * 1024.0)
+
+
 def estimate_render_time_sec(
     settings: RenderSettings,
     caps: Optional[HardwareCapabilities],
@@ -714,6 +785,20 @@ class RenderRunner:
         if verify_msg:
             emit_log(verify_msg)
 
+        try:
+            if os.path.isfile(out_path):
+                _save_bitrate_sample(
+                    codec=settings.codec,
+                    quality=settings.quality,
+                    width=settings.width,
+                    height=settings.height,
+                    fps=settings.fps,
+                    file_bytes=os.path.getsize(out_path),
+                    video_sec=last_video_sec,
+                )
+        except Exception:
+            pass
+
         wall_total = time.monotonic() - t0
         emit_log(f"렌더링 완료! ({last_frames:,}프레임, {last_video_sec:.2f}초 영상, 총 소요 {wall_total:.1f}초) -> {out_path}")
         emit_prog(RenderProgress(
@@ -766,7 +851,7 @@ class RenderRunner:
 
         os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
         st = os.stat(abs_lvl)
-        key_src = f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|v5"
+        key_src = f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|v6"
         h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
         out_mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip_jpg = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")

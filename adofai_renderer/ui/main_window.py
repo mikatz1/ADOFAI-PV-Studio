@@ -57,6 +57,7 @@ from ..render_runner import (
     RenderResult,
     RenderRunner,
     RenderSettings,
+    estimate_output_size_mb,
     estimate_render_time_sec,
 )
 from .dialogs import ExportSettingsDialog, PlanetSettingsDialog, RES_PRESETS, RenderConfirmDialog, SequenceSettingsDialog
@@ -419,13 +420,19 @@ class PreviewViewportWidget(QWidget):
         self.seek_seconds(0.0)
         return True
 
+    def has_video(self) -> bool:
+        return self._cap is not None and self._video_frames > 0
+
     def seek_seconds(self, sec: float) -> None:
         if self._cap is None or self._video_frames <= 0:
             return
         idx = max(0, min(self._video_frames - 1, int(round(sec * self._video_fps))))
         if idx == self._last_frame_idx and self._current_frame is not None:
             return
-        if idx != self._last_frame_idx + 1:
+        if self._last_frame_idx >= 0 and idx > self._last_frame_idx + 1 and idx <= self._last_frame_idx + 4:
+            for _ in range(idx - self._last_frame_idx - 1):
+                self._cap.grab()
+        elif idx != self._last_frame_idx + 1:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ok, bgr = self._cap.read()
         if not ok or bgr is None:
@@ -605,7 +612,7 @@ class MainWindow(QMainWindow):
         self._muted: bool = False
         self._playback_rate: float = 1.0
         self._play_timer = QTimer(self)
-        self._play_timer.setInterval(50)
+        self._play_timer.setInterval(16)
         self._play_timer.timeout.connect(self._on_play_tick)
 
         self._audio_out = QAudioOutput(self)
@@ -1395,13 +1402,21 @@ class MainWindow(QMainWindow):
         self._refresh_summary_ui()
         self._try_load_cached_preview()
 
-        if self.level_info.song_path and os.path.isfile(self.level_info.song_path):
-            self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
-            wfw = WaveformWorker(self.level_path, self.level_info.song_path, self.caps.ffmpeg_path)
-            wfw.ready.connect(self._on_waveform_ready)
-            wfw.finished.connect(lambda w=wfw: self._wf_workers.remove(w) if w in self._wf_workers else None)
-            self._wf_workers.append(wfw)
-            wfw.start()
+        # Only fall back to raw song file when no synced preview MP4 is loaded;
+        # otherwise _apply_preview_video() already attached the synced preview audio + waveform.
+        if not self.viewport.has_video():
+            if self.level_info.song_path and os.path.isfile(self.level_info.song_path):
+                self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
+                self._start_waveform_worker(self.level_info.song_path)
+
+    def _start_waveform_worker(self, audio_src: str) -> None:
+        if not audio_src or not os.path.isfile(audio_src):
+            return
+        wfw = WaveformWorker(self.level_path, audio_src, self.caps.ffmpeg_path)
+        wfw.ready.connect(self._on_waveform_ready)
+        wfw.finished.connect(lambda w=wfw: self._wf_workers.remove(w) if w in self._wf_workers else None)
+        self._wf_workers.append(wfw)
+        wfw.start()
 
     def _on_waveform_ready(self, lvl_path: str, peaks) -> None:
         if lvl_path == self.level_path and peaks:
@@ -1416,7 +1431,7 @@ class MainWindow(QMainWindow):
         key_src = (
             f"{self.level_path}|{st.st_size}|{int(st.st_mtime)}|"
             f"{self.planet_state['red_color']}|{self.planet_state['red_opacity']:.2f}|"
-            f"{self.planet_state['blue_color']}|{self.planet_state['blue_opacity']:.2f}|v5"
+            f"{self.planet_state['blue_color']}|{self.planet_state['blue_opacity']:.2f}|v6"
         )
         h = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
         mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
@@ -1437,7 +1452,9 @@ class MainWindow(QMainWindow):
         if self.viewport.load_video(video_path):
             if filmstrip_path and os.path.isfile(filmstrip_path):
                 self.timeline.set_filmstrip(filmstrip_path)
+            self._audio_player.setSource(QUrl())
             self._audio_player.setSource(QUrl.fromLocalFile(video_path))
+            self._start_waveform_worker(video_path)
             self.viewport.seek_seconds(self.timeline.playhead)
             self.lbl_vp_mode.setText("맞춤 (16:9)")
             self._update_timecode_label()
@@ -1452,6 +1469,9 @@ class MainWindow(QMainWindow):
             return
 
         self._stop_playback()
+        if force_rebuild:
+            self._audio_player.setSource(QUrl())
+            self.viewport.clear_video()
         self.btn_render.setEnabled(False)
         self.sb_state.setText("미리보기 생성 중")
         self.viewport.set_generating_state(True, "저해상도 썸네일 미리보기 엔진 준비 중...", 5.0)
@@ -1487,6 +1507,7 @@ class MainWindow(QMainWindow):
 
     def _clear_preview_cache(self) -> None:
         self._stop_playback()
+        self._audio_player.setSource(QUrl())
         self.viewport.clear_video()
         if os.path.isdir(PREVIEW_CACHE_DIR):
             shutil.rmtree(PREVIEW_CACHE_DIR, ignore_errors=True)
@@ -1496,6 +1517,9 @@ class MainWindow(QMainWindow):
         if self.level_info:
             detail = f"BPM {self.level_info.bpm:g}, 타일 {self.level_info.tile_count:,}, 장식 {self.level_info.decoration_count:,}"
             self.viewport.set_level_placeholder(self.level_info.display_title, detail)
+            if self.level_info.song_path and os.path.isfile(self.level_info.song_path):
+                self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
+                self._start_waveform_worker(self.level_info.song_path)
 
     # ------------------------------------------------------------------ Interactive Sidebar Handlers
     def _on_quick_export_changed(self) -> None:
@@ -2059,13 +2083,7 @@ class MainWindow(QMainWindow):
     def _refresh_live_estimates(self) -> None:
         settings = self._build_render_settings()
         est_sec, target_frames, clip_dur = estimate_render_time_sec(settings, self.caps, self.level_duration)
-        # Rough bitrate-based output size estimate (Mbps scaled by pixels, fps, quality, codec)
-        px_ratio = (settings.width * settings.height) / float(1920 * 1080)
-        fps_ratio = settings.fps / 60.0
-        q_mult = {"ultra": 1.65, "high": 1.0, "balanced": 0.62}.get(settings.quality, 1.0)
-        codec_mult = 0.72 if settings.codec == "hevc" else 1.0
-        est_mbps = 12.5 * (px_ratio ** 0.85) * (fps_ratio ** 0.75) * q_mult * codec_mult + 0.32
-        est_mb = (est_mbps * clip_dur) / 8.0
+        est_mb = estimate_output_size_mb(settings, self.level_info, clip_dur)
 
         self.val_est_dur.setText(f"{format_timecode(clip_dur)} ({target_frames:,}f)")
         self.val_est_size.setText(f"약 {est_mb:.0f} MB" if est_mb < 1024 else f"약 {est_mb / 1024.0:.2f} GB")

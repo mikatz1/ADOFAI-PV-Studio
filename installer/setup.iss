@@ -2,7 +2,7 @@
 ; Build via: installer\build_installer.ps1  (or ISCC.exe installer\setup.iss)
 
 #define MyAppName "ADOFAI PV Renderer"
-#define MyAppVersion "2.0.1"
+#define MyAppVersion "2.0.3"
 #define MyAppPublisher "ADOFAI PV Renderer"
 #define MyAppExeName "ADOFAI PV Renderer.exe"
 
@@ -34,7 +34,7 @@ SolidCompression=yes
 CloseApplications=force
 RestartApplications=no
 ShowLanguageDialog=auto
-VersionInfoVersion=2.0.1.0
+VersionInfoVersion=2.0.3.0
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription=ADOFAI Offline PV Renderer 설치 프로그램
 

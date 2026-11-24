@@ -76,10 +76,10 @@ python render.py "level\...\CDF2.adofai" -o "output\custom.mp4" --gpu-limit 60 -
 # 단일 실행 파일 + 바탕화면 바로가기 빌드
 powershell -ExecutionPolicy Bypass -File build_exe.ps1
 
-# Inno Setup 6 설치 마법사 빌드 (dist\installer\ADOFAI_PV_Renderer_Setup_2.0.1.exe)
+# Inno Setup 6 설치 마법사 빌드 (dist\installer\ADOFAI_PV_Renderer_Setup_2.0.3.exe)
 powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
-- `dist\ADOFAI PV Renderer.exe` 단일 실행 파일(아이콘 `assets\app_icon.ico` 및 C# 에이전트 DLL 내장)과 한국어/영어 Inno Setup 6 설치 마법사(`dist\installer\ADOFAI_PV_Renderer_Setup_2.0.1.exe`)를 생성합니다.
+- `dist\ADOFAI PV Renderer.exe` 단일 실행 파일(아이콘 `assets\app_icon.ico` 및 C# 에이전트 DLL 내장)과 한국어/영어 Inno Setup 6 설치 마법사(`dist\installer\ADOFAI_PV_Renderer_Setup_2.0.3.exe`)를 생성합니다.
 
 ### 업데이트 (자동 업데이트 확인)
 
@@ -88,7 +88,7 @@ powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 릴리스 배포 방법 (관리자):
 
 1. `adofai_renderer/version.py`의 `__version__`과 `installer/setup.iss`의 `MyAppVersion`을 새 버전으로 올립니다.
-2. `powershell -ExecutionPolicy Bypass -File installeruild_installer.ps1 -RebuildExe`
+2. `powershell -ExecutionPolicy Bypass -File installer\\build_installer.ps1 -RebuildExe`
 3. 태그 `vX.Y.Z`로 GitHub 릴리스를 만들고 `dist\installer\ADOFAI_PV_Renderer_Setup_X.Y.Z.exe`를 첨부합니다 (파일명에 `Setup`이 포함되어야 합니다).
 
 ### 5. C# 렌더 에이전트 재빌드 (ADOFAI 대형 업데이트 시)

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..preloader import PreloadResult, run_startup_preload
+from ..version import __version__
 from .render_card import ClaudeSpinnerGlyph
 from .theme import (
     ACCENT_PRIMARY,
@@ -143,7 +144,7 @@ class WelcomeCard(QWidget):
         title_col.addWidget(self.lbl_sub)
         hdr.addLayout(title_col, 1)
 
-        lbl_ver = QLabel("v2.0")
+        lbl_ver = QLabel(f"v{__version__}")
         lbl_ver.setStyleSheet(f"color: {TEXT_MUTED}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
         hdr.addWidget(lbl_ver, 0, Qt.AlignTop)
         root.addLayout(hdr)

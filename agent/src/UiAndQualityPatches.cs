@@ -131,13 +131,19 @@ namespace AdofaiRenderAgent
                 TryPatchMethods(harmony, typeof(PlanetarySystem), "ApplyMultiplanetColors", null, "PlanetarySystem_ApplyMultiplanetColors_Postfix");
             }
 
-            // 3) Zero calibration offsets & disable async input so timing is 100% deterministic
+            // 3) Zero all device calibration offsets & disable async input so preview and final renders default strictly to 0ms offset
             TryPatchGetter(harmony, typeof(scrConductor), "calibration_i", "ReturnZeroFloat_Prefix", null);
             TryPatchGetter(harmony, typeof(scrConductor), "calibration_v", "ReturnZeroFloat_Prefix", null);
+            TryPatchGetter(harmony, typeof(Persistence), "inputOffset", "ReturnZeroFloat_Prefix", null);
+            TryPatchGetter(harmony, typeof(Persistence), "visualOffset", "ReturnZeroFloat_Prefix", null);
             TryPatchGetter(harmony, typeof(AsyncInputManager), "isActive", "ReturnFalseBool_Prefix", null);
+            TryPatchMethods(harmony, typeof(Persistence), "GetChosenAsynchronousInput", "ReturnFalseBool_Prefix", null);
+            TryPatchMethods(harmony, typeof(AsyncInputManager), "StartHook", "SkipVoid_Prefix", null);
+            ForceZeroCalibrationOffsets();
 
-            // 4) Force Auto-play, NoHUD, NoAutoHUD
+            // 4) Force Auto-play (modern 0.5 deg precision), NoHUD, NoAutoHUD
             TryPatchGetter(harmony, typeof(RDC), "auto", "ReturnTrueBool_Prefix", null);
+            TryPatchGetter(harmony, typeof(RDC), "useOldAuto", "ReturnFalseBool_Prefix", null);
             TryPatchGetter(harmony, typeof(RDC), "noHud", "ReturnTrueBool_Prefix", null);
             TryPatchGetter(harmony, typeof(RDC), "noAutoHud", "ReturnTrueBool_Prefix", null);
 
@@ -153,10 +159,13 @@ namespace AdofaiRenderAgent
             TryPatchMethods(harmony, typeof(scnSplash), "GoToMenu", "SkipVoid_Prefix", null);
             TryPatchMethods(harmony, typeof(ErrorCanvas), "ShowError", "ErrorCanvas_ShowError_Prefix", null);
 
-            // Prevent modifying user's save file / Steam stats during offline rendering
+            // Prevent modifying user's save file / calibration presets / Steam stats during offline rendering
             TryPatchMethods(harmony, typeof(scrMistakesManager), "Save", "MistakesSave_Prefix", null);
             TryPatchMethods(harmony, typeof(Persistence), "Save", "SkipVoid_Prefix", null);
+            TryPatchMethods(harmony, typeof(Persistence), "WriteSaveToDisk", "SkipVoid_Prefix", null);
             TryPatchMethods(harmony, typeof(Persistence), "SetLevelTutorialProgress", "SkipVoid_Prefix", null);
+            TryPatchMethods(harmony, typeof(scrConductor), "SaveCurrentPreset", "SkipVoid_Prefix", null);
+            TryPatchMethods(harmony, typeof(scrConductor), "SaveVisualOffset", "SkipVoid_Prefix", null);
 
             // 6) Trigger auto-start cleanly when WaitForStartCo waits for player input
             TryPatchMethods(harmony, typeof(scrPlayerManager), "AnyValidInputWasTriggered", "AnyValidInput_Prefix", null);
@@ -481,6 +490,87 @@ namespace AdofaiRenderAgent
                 }
             }
             return _fiCamRT != null ? (_fiCamRT.GetValue(cam) as RenderTexture) : null;
+        }
+
+        private static readonly FieldInfo _fiCurrentPreset =
+            typeof(scrConductor).GetField("currentPreset", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo _fiUserPresets =
+            typeof(scrConductor).GetField("userPresets", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo _fiDefaultPresets =
+            typeof(scrConductor).GetField("defaultPresets", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo _fiPresetInputOffset =
+            typeof(CalibrationPreset).GetField("inputOffset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        /// <summary>
+        /// Zeroes ADOFAI's in-memory device calibration fields directly.
+        /// Mono JIT inlines the 18-byte static getter scrConductor.get_calibration_i() into scrConductor.Update(),
+        /// so patching the getter alone is insufficient; zeroing currentPreset.inputOffset and visualOffset
+        /// guarantees exact 0ms device offset in both rough previews and final renders (without saving to disk).
+        /// </summary>
+        public static void ForceZeroCalibrationOffsets()
+        {
+            try
+            {
+                scrConductor.visualOffset = 0;
+
+                if (_fiCurrentPreset != null && _fiPresetInputOffset != null)
+                {
+                    object boxed = _fiCurrentPreset.GetValue(null);
+                    if (boxed != null)
+                    {
+                        int cur = (int)_fiPresetInputOffset.GetValue(boxed);
+                        if (cur != 0)
+                        {
+                            _fiPresetInputOffset.SetValue(boxed, 0);
+                            _fiCurrentPreset.SetValue(null, boxed);
+                        }
+                    }
+                }
+
+                ZeroPresetList(_fiUserPresets);
+                ZeroPresetList(_fiDefaultPresets);
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Warn("ForceZeroCalibrationOffsets warning: " + ex.Message);
+            }
+        }
+
+        private static void ZeroPresetList(FieldInfo fiList)
+        {
+            if (fiList == null || _fiPresetInputOffset == null) return;
+            System.Collections.IList list = fiList.GetValue(null) as System.Collections.IList;
+            if (list == null) return;
+            for (int i = 0; i < list.Count; i++)
+            {
+                object item = list[i];
+                if (item == null) continue;
+                int val = (int)_fiPresetInputOffset.GetValue(item);
+                if (val != 0)
+                {
+                    _fiPresetInputOffset.SetValue(item, 0);
+                    list[i] = item; // value-type struct: write modified copy back into list
+                }
+            }
+        }
+
+        public static void EnsureZeroCalibrationFast()
+        {
+            try
+            {
+                if (scrConductor.visualOffset != 0)
+                    scrConductor.visualOffset = 0;
+                if (_fiCurrentPreset != null && _fiPresetInputOffset != null)
+                {
+                    object boxed = _fiCurrentPreset.GetValue(null);
+                    if (boxed != null && (int)_fiPresetInputOffset.GetValue(boxed) != 0)
+                    {
+                        _fiPresetInputOffset.SetValue(boxed, 0);
+                        _fiCurrentPreset.SetValue(null, boxed);
+                    }
+                }
+            }
+            catch { }
         }
 
         public static void SuppressAllOutOfLevelUI()

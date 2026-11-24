@@ -98,6 +98,7 @@ namespace AdofaiRenderAgent
                 Vector3 pv0 = st.Has ? st.PrevPivot : pivot;
 
                 bool arc = false;
+                Vector3 arcCenter = pivot;
                 float a0 = 0f, delta = 0f, r0 = 0f, r1 = 0f;
                 if (st.Has && orbiting && st.PrevOrbiting)
                 {
@@ -107,8 +108,37 @@ namespace AdofaiRenderAgent
                     r1 = r;
                     if (pivMove < 0.002f * Mathf.Max(1f, r) && Mathf.Abs(r1 - r0) < 0.25f * r)
                     {
+                        arcCenter = pivot;
                         a0 = Mathf.Atan2(p0.y - pv0.y, p0.x - pv0.x);
                         float a1 = Mathf.Atan2(pos.y - pivot.y, pos.x - pivot.x);
+                        delta = Mathf.DeltaAngle(a0 * Mathf.Rad2Deg, a1 * Mathf.Rad2Deg) * Mathf.Deg2Rad;
+                        arc = Mathf.Abs(delta) <= 170f * Mathf.Deg2Rad;
+                    }
+                }
+                else if (st.Has && orbiting && !st.PrevOrbiting)
+                {
+                    // Planet just switched from stationary pivot -> orbiting around new pivot.
+                    r1 = Mathf.Max(0.0001f, Vector2.Distance(pivot, pos));
+                    r0 = Vector2.Distance(pivot, p0);
+                    if (Mathf.Abs(r1 - r0) < 0.15f * r1)
+                    {
+                        arcCenter = pivot;
+                        a0 = Mathf.Atan2(p0.y - pivot.y, p0.x - pivot.x);
+                        float a1 = Mathf.Atan2(pos.y - pivot.y, pos.x - pivot.x);
+                        delta = Mathf.DeltaAngle(a0 * Mathf.Rad2Deg, a1 * Mathf.Rad2Deg) * Mathf.Deg2Rad;
+                        arc = Mathf.Abs(delta) <= 170f * Mathf.Deg2Rad;
+                    }
+                }
+                else if (st.Has && !orbiting && st.PrevOrbiting)
+                {
+                    // Planet just landed from orbiting around pv0 -> stationary on target tile.
+                    r0 = Mathf.Max(0.0001f, Vector2.Distance(pv0, p0));
+                    r1 = Vector2.Distance(pv0, pos);
+                    if (Mathf.Abs(r1 - r0) < 0.15f * r0)
+                    {
+                        arcCenter = pv0;
+                        a0 = Mathf.Atan2(p0.y - pv0.y, p0.x - pv0.x);
+                        float a1 = Mathf.Atan2(pos.y - pv0.y, pos.x - pv0.x);
                         delta = Mathf.DeltaAngle(a0 * Mathf.Rad2Deg, a1 * Mathf.Rad2Deg) * Mathf.Deg2Rad;
                         arc = Mathf.Abs(delta) <= 170f * Mathf.Deg2Rad;
                     }
@@ -127,7 +157,7 @@ namespace AdofaiRenderAgent
                         {
                             float a = a0 + delta * u;
                             float rr = Mathf.Lerp(r0, r1, u);
-                            e = new Vector3(pivot.x + Mathf.Cos(a) * rr, pivot.y + Mathf.Sin(a) * rr, pos.z);
+                            e = new Vector3(arcCenter.x + Mathf.Cos(a) * rr, arcCenter.y + Mathf.Sin(a) * rr, pos.z);
                         }
                         else
                         {
