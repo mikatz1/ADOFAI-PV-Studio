@@ -99,20 +99,119 @@ def _write_wav_pcm16(path: str, stereo_f32: np.ndarray, sample_rate: int) -> Non
         wf.writeframes(pcm16.tobytes())
 
 
-def _soft_limit_inplace(mix: np.ndarray) -> None:
-    """Apply gentle soft-knee limiting above 0.92 to avoid harsh clipping during dense hitsound streams."""
-    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
-    if peak <= 0.98:
+def _clean_hitsound_clip(clip: np.ndarray, sample_rate: int, hpf_hz: float = 40.0) -> np.ndarray:
+    """Remove DC offset, de-click hard non-zero starts, and strip sub-sonic rumble (<hpf_hz) from a hitsound clip.
+
+    Because filtering is linear, applying the zero-phase 2nd-order Butterworth HPF once per unique cached clip
+    is mathematically identical to filtering the summed hitsound bus while using negligible CPU/RAM.
+    """
+    if clip.size == 0:
+        return clip
+    c = clip.astype(np.float32, copy=True)
+    c -= np.mean(c, axis=0, keepdims=True)
+
+    # Micro fade-in (0.5 ms) only if sample 0 starts with a sharp DC step (e.g. sndFireTile ~0.69)
+    if float(np.max(np.abs(c[0]))) > 0.05:
+        fi = min(int(round(0.0005 * sample_rate)), len(c))
+        if fi > 1:
+            c[:fi] *= np.linspace(0.0, 1.0, fi, dtype=np.float32)[:, None]
+
+    if hpf_hz > 0.0 and len(c) >= 64:
+        pad = 1024
+        n_fft = len(c) + pad
+        spec = np.fft.rfft(c, n=n_fft, axis=0)
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sample_rate))
+        h_mag = 1.0 / np.sqrt(1.0 + (hpf_hz / np.maximum(freqs, 1e-6)) ** 4)
+        h_mag[0] = 0.0
+        c = np.fft.irfft(spec * h_mag[:, None], n=n_fft, axis=0)[: len(c)].astype(np.float32)
+
+    return c
+
+
+def _lookahead_limit_inplace(
+    mix: np.ndarray,
+    sample_rate: int = 48000,
+    ceiling: float = 0.92,
+    lookahead_ms: float = 2.5,
+    release_ms: float = 45.0,
+) -> None:
+    """Clean look-ahead envelope peak limiter (replaces memoryless tanh clipping).
+
+    Prevents low-frequency intermodulation distortion (IMD), DC shift, and lossy AAC true-peak explosions
+    when dense hitsounds overlap with full-scale BGM.
+    """
+    if mix.size == 0:
         return
-    knee = 0.92
-    mask = np.abs(mix) > knee
+    peak = float(np.max(np.abs(mix)))
+    if peak <= ceiling:
+        return
+
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    hop = 16  # 0.333 ms envelope resolution at 48 kHz
+    peak_env = np.max(np.abs(mix), axis=1)
+    pad = (-len(peak_env)) % hop
+    p_pad = np.pad(peak_env, (0, pad)) if pad else peak_env
+    blk = p_pad.reshape(-1, hop).max(axis=1)
+
+    la_blk = max(1, int(round((lookahead_ms * 0.001 * sample_rate) / hop)))
+    b_pad = np.pad(blk, (la_blk, la_blk), mode="edge")
+    win_max = sliding_window_view(b_pad, 2 * la_blk + 1).max(axis=1)
+    target_g = np.where(win_max > ceiling, ceiling / np.maximum(win_max, 1e-9), 1.0).astype(np.float32)
+
+    atk_a = float(math.exp(-hop / max(1.0, lookahead_ms * 0.001 * sample_rate * 0.45)))
+    rel_a = float(math.exp(-hop / max(1.0, release_ms * 0.001 * sample_rate)))
+    g_list = target_g.tolist()
+    cur = 1.0
+    for i, tg in enumerate(g_list):
+        if tg < cur:
+            cur = tg + atk_a * (cur - tg)
+        else:
+            cur = tg + rel_a * (cur - tg)
+        g_list[i] = cur
+
+    g_blk = np.asarray(g_list, dtype=np.float32)
+    xp = np.arange(len(g_blk), dtype=np.float32) * hop + (hop * 0.5)
+    gain = np.interp(np.arange(len(mix), dtype=np.float32), xp, g_blk).astype(np.float32)
+    mix *= gain[:, None]
+
+    # Gentle safety guard only for rare sub-block micro-transients above ceiling + 0.02
+    guard = min(0.95, ceiling + 0.02)
+    mask = np.abs(mix) > guard
     if np.any(mask):
+        headroom = max(0.01, 0.975 - guard)
         vals = mix[mask]
-        sign = np.sign(vals)
-        over = np.abs(vals) - knee
-        # Smoothly map [knee, inf) -> [knee, 0.995)
-        headroom = 0.075
-        mix[mask] = sign * (knee + headroom * np.tanh(over / headroom))
+        over = np.abs(vals) - guard
+        mix[mask] = np.sign(vals) * (guard + headroom * np.tanh(over / headroom))
+
+
+def _coalesce_simultaneous_hits(hit_events: list) -> list:
+    """Coalesce near-simultaneous identical hitsounds (<4 ms, e.g. multi-tile chords/pseudos)
+    using sqrt-energy scaling (capped at 1.30x) instead of linear phase-doubling spikes."""
+    if len(hit_events) <= 1:
+        return hit_events
+    hit_events.sort(key=lambda e: (e[0], e[1], e[2]))  # (wav_path, pitch_key, timeSec, vol, cat)
+    merged = []
+    i = 0
+    n = len(hit_events)
+    while i < n:
+        wav_path, pitch_key, t0, vol0, cat0 = hit_events[i]
+        sq_sum = vol0 * vol0
+        max_v = vol0
+        j = i + 1
+        while j < n and hit_events[j][0] == wav_path and hit_events[j][1] == pitch_key and (hit_events[j][2] - t0) < 0.004:
+            vj = hit_events[j][3]
+            sq_sum += vj * vj
+            if vj > max_v:
+                max_v = vj
+            j += 1
+        if j > i + 1:
+            eff_vol = min(max_v * 1.30, math.sqrt(sq_sum))
+        else:
+            eff_vol = vol0
+        merged.append((wav_path, pitch_key, t0, eff_vol, cat0))
+        i = j
+    return merged
 
 
 def mix_audio_from_timeline(
@@ -143,7 +242,9 @@ def mix_audio_from_timeline(
         duration_sec = frames / float(fps)
 
     total_samples = max(1, int(round(duration_sec * sr)))
-    mix = np.zeros((total_samples, 2), dtype=np.float32)
+    bgm_bus = np.zeros((total_samples, 2), dtype=np.float32)
+    hit_bus = np.zeros((total_samples, 2), dtype=np.float32)
+    sfx_bus = np.zeros((total_samples, 2), dtype=np.float32)
 
     # 1. Mix BGM track at exact songStartInVideoSec
     song_path = tl.get("songFilePath", "")
@@ -168,17 +269,20 @@ def mix_audio_from_timeline(
         avail_dst = total_samples - dst_start
         copy_len = min(avail_src, avail_dst)
         if copy_len > 0:
-            mix[dst_start : dst_start + copy_len] += bgm[src_start : src_start + copy_len] * gain
+            bgm_bus[dst_start : dst_start + copy_len] += bgm[src_start : src_start + copy_len] * gain
 
-    # 2. Mix hitsounds, hold sounds, countdown ticks, and custom SFX using real exported WAVs
+    # 2. Separate percussive hitsounds (managed for clean overlap) from holds & general SFX
     events = tl.get("events", [])
     clip_cache: Dict[tuple, np.ndarray] = {}
     mixed_events = 0
     missing_clips = set()
+    percussive_hits = []   # (wav_path, pitch_key, timeSec, ev_vol, cat)
+    other_events = []      # (wav_path, pitch_key, timeSec, ev_end, ev_vol, is_hit_bus)
 
     for ev in events:
         cat = ev.get("category", "hitsound")
-        if cat in ("hitsound", "holdsound", "countdown"):
+        is_hit_cat = cat in ("hitsound", "holdsound", "countdown")
+        if is_hit_cat:
             if not options.include_hitsounds or options.hitsound_volume <= 0.0:
                 continue
             cat_gain = options.hitsound_volume
@@ -204,16 +308,76 @@ def mix_audio_from_timeline(
         if ev_vol <= 1e-5:
             continue
 
-        cache_key = (wav_path, round(ev_pitch, 4))
-        clip = clip_cache.get(cache_key)
-        if clip is None:
-            clip = _decode_audio_f32_stereo(ffmpeg_path, wav_path, target_sr=sr, pitch=ev_pitch)
-            clip_cache[cache_key] = clip
+        pitch_key = round(ev_pitch, 4)
+        if cat in ("hitsound", "countdown") and ev_end <= ev_time + 0.005:
+            percussive_hits.append((wav_path, pitch_key, ev_time, ev_vol, cat))
+        else:
+            other_events.append((wav_path, pitch_key, ev_time, ev_end, ev_vol, is_hit_cat))
 
+    def _get_clip(wav_path: str, pitch_key: float, is_hitsound: bool) -> np.ndarray:
+        ck = (wav_path, pitch_key, is_hitsound)
+        clip = clip_cache.get(ck)
+        if clip is None:
+            raw_clip = _decode_audio_f32_stereo(ffmpeg_path, wav_path, target_sr=sr, pitch=pitch_key)
+            clip = _clean_hitsound_clip(raw_clip, sr, hpf_hz=40.0 if is_hitsound else 20.0)
+            clip_cache[ck] = clip
+        return clip
+
+    # 2a. Mix percussive hitsounds onto hit_bus with chord coalescing & smooth same-clip tail choke
+    #     so dense high-BPM streams never accumulate muddy sub-bass tails.
+    percussive_hits = _coalesce_simultaneous_hits(percussive_hits)
+    n_hits = len(percussive_hits)
+    for idx_h, (wav_path, pitch_key, ev_time, ev_vol, _cat) in enumerate(percussive_hits):
+        clip = _get_clip(wav_path, pitch_key, is_hitsound=True)
         if len(clip) == 0:
             continue
 
-        # Handle hold loop / bounded endTimeSec
+        clip_sec = len(clip) / float(sr)
+        # Short percussive hits (<= 1.0s, e.g. sndKick/sndChuck/sndFireTile) smoothly choke on the next
+        # same-clip retrigger; long reverb hits (> 1.0s, e.g. sndReverbClack) keep up to 4 overlapping tails.
+        look_ahead_idx = idx_h + (1 if clip_sec <= 1.0 else 4)
+        active_clip = clip
+        if look_ahead_idx < n_hits:
+            nxt_wav, nxt_pitch, nxt_time, _, _ = percussive_hits[look_ahead_idx]
+            if nxt_wav == wav_path and nxt_pitch == pitch_key:
+                dt_next = nxt_time - ev_time
+                if 0.0 < dt_next < clip_sec:
+                    if clip_sec <= 1.0:
+                        fade_ms = min(20.0, max(8.0, dt_next * 1000.0 * 0.55))
+                    else:
+                        fade_ms = 40.0
+                    fade_n = int(round(fade_ms * 0.001 * sr))
+                    keep_n = int(round(dt_next * sr)) + fade_n
+                    if 2 < keep_n < len(clip):
+                        active_clip = clip[:keep_n].copy()
+                        fn = min(fade_n, len(active_clip))
+                        if fn > 1:
+                            # Smooth half-cosine fade (C1-continuous, click-free)
+                            u = np.linspace(0.0, math.pi, fn, dtype=np.float32)
+                            ramp = (0.5 * (1.0 + np.cos(u)))[:, None]
+                            active_clip[-fn:] *= ramp
+
+        start_idx = int(round(ev_time * sr))
+        if start_idx >= total_samples:
+            continue
+        if start_idx < 0:
+            src_start = -start_idx
+            dst_start = 0
+        else:
+            src_start = 0
+            dst_start = start_idx
+
+        copy_len = min(len(active_clip) - src_start, total_samples - dst_start)
+        if copy_len > 0:
+            hit_bus[dst_start : dst_start + copy_len] += active_clip[src_start : src_start + copy_len] * ev_vol
+            mixed_events += 1
+
+    # 2b. Mix hold sounds and general SFX
+    for wav_path, pitch_key, ev_time, ev_end, ev_vol, is_hit_bus in other_events:
+        clip = _get_clip(wav_path, pitch_key, is_hitsound=is_hit_bus)
+        if len(clip) == 0:
+            continue
+
         active_clip = clip
         if ev_end > ev_time + 0.005:
             req_len = int(round((ev_end - ev_time) * sr))
@@ -224,7 +388,8 @@ def mix_audio_from_timeline(
                 active_clip = np.tile(clip, (reps, 1))[:req_len].copy()
             fade = min(int(0.005 * sr), len(active_clip))
             if fade > 1:
-                ramp = np.linspace(1.0, 0.0, fade, dtype=np.float32)[:, None]
+                u = np.linspace(0.0, math.pi, fade, dtype=np.float32)
+                ramp = (0.5 * (1.0 + np.cos(u)))[:, None]
                 active_clip[-fade:] *= ramp
 
         start_idx = int(round(ev_time * sr))
@@ -239,13 +404,20 @@ def mix_audio_from_timeline(
 
         copy_len = min(len(active_clip) - src_start, total_samples - dst_start)
         if copy_len > 0:
-            mix[dst_start : dst_start + copy_len] += active_clip[src_start : src_start + copy_len] * ev_vol
+            bus = hit_bus if is_hit_bus else sfx_bus
+            bus[dst_start : dst_start + copy_len] += active_clip[src_start : src_start + copy_len] * ev_vol
             mixed_events += 1
 
     if missing_clips and log_cb:
         log_cb(f"참고: WAV를 찾지 못한 오디오 클립 {len(missing_clips)}개: {', '.join(sorted(missing_clips))}")
 
-    _soft_limit_inplace(mix)
+    # 3. Clean bus limiting + true-peak-safe master look-ahead limiter
+    _lookahead_limit_inplace(hit_bus, sample_rate=sr, ceiling=0.78, lookahead_ms=2.0, release_ms=40.0)
+    mix = bgm_bus
+    mix += hit_bus
+    mix += sfx_bus
+    _lookahead_limit_inplace(mix, sample_rate=sr, ceiling=0.92, lookahead_ms=2.5, release_ms=45.0)
+
     _write_wav_pcm16(output_wav_path, mix, sr)
     if log_cb:
         log_cb(f"오디오 오프라인 믹싱 완료: {duration_sec:.2f}초, 타격음/효과음 {mixed_events}개 합성")

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
 from ..preloader import PreloadResult, run_startup_preload
 from ..version import __version__
 from .render_card import ClaudeSpinnerGlyph
@@ -87,12 +88,12 @@ class _DualOrbitMark(QWidget):
 class WelcomeCard(QWidget):
     ready = Signal(object)  # PreloadResult
 
-    STEP_TITLES = [
-        "엔진 경로 및 Doorstop 확인",
-        "GPU · FFmpeg 하드웨어 인코더 검증",
-        "C# 오프라인 렌더 에이전트 점검",
-        "Unity 엔진 바이너리 메모리 프리워밍",
-        "워크스페이스 및 샘플 메타데이터 분석",
+    STEP_KEYS = [
+        "welcome.step1",
+        "welcome.step2",
+        "welcome.step3",
+        "welcome.step4",
+        "welcome.step5",
     ]
 
     def __init__(self, parent: Optional[QWidget] = None, auto_start: bool = True) -> None:
@@ -138,7 +139,7 @@ class WelcomeCard(QWidget):
         f.setPointSize(13)
         f.setBold(True)
         lbl_title.setFont(f)
-        self.lbl_sub = QLabel("엔진 및 하드웨어 환경 확인 중...")
+        self.lbl_sub = QLabel(tr("welcome.sub_init"))
         self.lbl_sub.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         title_col.addWidget(lbl_title)
         title_col.addWidget(self.lbl_sub)
@@ -157,14 +158,14 @@ class WelcomeCard(QWidget):
         # Step checklist
         list_box = QVBoxLayout()
         list_box.setSpacing(6)
-        for text in self.STEP_TITLES:
+        for key in self.STEP_KEYS:
             row = QHBoxLayout()
             row.setSpacing(8)
             dot = QLabel("·")
             dot.setFixedWidth(14)
             dot.setAlignment(Qt.AlignCenter)
             dot.setStyleSheet(f"color: {TEXT_MUTED}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px;")
-            lbl = QLabel(text)
+            lbl = QLabel(tr(key))
             lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
             row.addWidget(dot)
             row.addWidget(lbl, 1)
@@ -181,9 +182,9 @@ class WelcomeCard(QWidget):
         det_row.setSpacing(7)
         self.spinner = ClaudeSpinnerGlyph()
         det_row.addWidget(self.spinner)
-        self.lbl_detail = QLabel("초기화 시작 중...")
+        self.lbl_detail = QLabel(tr("welcome.detail_init"))
         self.lbl_detail.setStyleSheet(
-            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; font-size: 11px;"
+            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; font-size: 11px;"
         )
         det_row.addWidget(self.lbl_detail, 1)
         root.addLayout(det_row)
@@ -232,10 +233,10 @@ class WelcomeCard(QWidget):
                 self._step_labels[i].setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
 
         if pct >= 99.9:
-            self.lbl_sub.setText("모든 시스템 준비 완료")
+            self.lbl_sub.setText(tr("welcome.ready"))
             self.spinner.set_state("done")
             self.lbl_detail.setStyleSheet(
-                "color: #6ab07c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; font-size: 11px;"
+                "color: #6ab07c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; font-size: 11px;"
             )
         else:
             if title:

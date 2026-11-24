@@ -2,7 +2,7 @@
 ; Build via: installer\build_installer.ps1  (or ISCC.exe installer\setup.iss)
 
 #define MyAppName "ADOFAI PV Renderer"
-#define MyAppVersion "2.0.3"
+#define MyAppVersion "2.0.4"
 #define MyAppPublisher "ADOFAI PV Renderer"
 #define MyAppExeName "ADOFAI PV Renderer.exe"
 
@@ -33,14 +33,15 @@ Compression=lzma2/normal
 SolidCompression=yes
 CloseApplications=force
 RestartApplications=no
-ShowLanguageDialog=auto
-VersionInfoVersion=2.0.3.0
+ShowLanguageDialog=yes
+VersionInfoVersion=2.0.4.0
 VersionInfoProductName={#MyAppName}
-VersionInfoDescription=ADOFAI Offline PV Renderer 설치 프로그램
+VersionInfoDescription=ADOFAI Offline PV Renderer Setup
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"; LicenseFile: "license_ko.txt"
 Name: "english"; MessagesFile: "compiler:Default.isl"; LicenseFile: "license_en.txt"
+Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"; LicenseFile: "license_ja.txt"
 
 [CustomMessages]
 korean.TaskDesktop=바탕화면 바로가기 만들기
@@ -67,6 +68,18 @@ english.OutputPageSub=Setup will create this folder and use it as the app's defa
 english.OutputPageLabel=MP4 export folder:
 english.OutputPageEmpty=Please enter an export folder.
 
+japanese.TaskDesktop=デスクトップにショートカットを作成
+japanese.TaskContextMenu=.adofai 右クリックメニューに「ADOFAI PV Rendererで開く」を追加
+japanese.ContextMenuLabel=ADOFAI PV Rendererで開く
+japanese.UninstallLabel={#MyAppName} をアンインストール
+japanese.LaunchApp={#MyAppName} を起動
+japanese.GroupAdditional=追加タスク:
+japanese.OutputPageTitle=動画の保存先
+japanese.OutputPageDesc=レンダリングしたMP4ファイルを保存する初期フォルダを選択してください。
+japanese.OutputPageSub=インストーラーはこのフォルダを作成し、アプリの既定出力先として設定します。アプリ内からもいつでも変更できます。
+japanese.OutputPageLabel=MP4出力フォルダ:
+japanese.OutputPageEmpty=出力フォルダを入力してください。
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:TaskDesktop}"; GroupDescription: "{cm:GroupAdditional}"
 Name: "contextmenu"; Description: "{cm:TaskContextMenu}"; GroupDescription: "{cm:GroupAdditional}"; Flags: unchecked
@@ -86,8 +99,9 @@ Root: HKA; Subkey: "Software\Classes\.adofai\shell\OpenWithAdofaiPvRenderer"; Va
 Root: HKA; Subkey: "Software\Classes\.adofai\shell\OpenWithAdofaiPvRenderer"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExeName}"",0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\.adofai\shell\OpenWithAdofaiPvRenderer\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
 
-; Remember the chosen MP4 export folder (read by the app at startup)
+; Remember the chosen MP4 export folder and UI language (read by the app at startup)
 Root: HKCU; Subkey: "Software\ADOFAI PV Renderer"; ValueType: string; ValueName: "OutputDir"; ValueData: "{code:GetOutputDir}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\ADOFAI PV Renderer"; ValueType: string; ValueName: "Language"; ValueData: "{code:GetInstallLang}"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
@@ -107,6 +121,23 @@ var
 function GetOutputDir(Param: string): string;
 begin
   Result := RemoveBackslashUnlessRoot(OutputPage.Values[0]);
+end;
+
+function GetInstallLang(Param: string): string;
+var
+  Existing: string;
+begin
+  if WizardSilent and RegQueryStringValue(HKCU, 'Software\ADOFAI PV Renderer', 'Language', Existing) and (Existing <> '') then
+  begin
+    Result := Existing;
+    exit;
+  end;
+  if ActiveLanguage = 'korean' then
+    Result := 'ko'
+  else if ActiveLanguage = 'japanese' then
+    Result := 'ja'
+  else
+    Result := 'en';
 end;
 
 procedure InitializeWizard;

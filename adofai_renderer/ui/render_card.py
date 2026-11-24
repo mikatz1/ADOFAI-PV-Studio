@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
 from ..render_runner import RenderProgress, RenderResult, RenderRunner, RenderSettings
 from .theme import (
     ACCENT_PRIMARY,
@@ -123,30 +124,30 @@ class ClaudeSpinnerGlyph(QWidget):
 
 
 class ClaudeConsoleBar(QFrame):
-    """Monospace dark console status strip with blue starburst spinner and stage-accurate Korean status."""
+    """Monospace dark console status strip with blue starburst spinner and stage-accurate localized status."""
 
-    STAGE_VERBS = {
-        "launching": "렌더 엔진 실행 중...",
-        "loading_scene": "게임 씬 초기화 중...",
-        "loading_level": "레벨 · 장식 로딩 중...",
-        "starting_playback": "가상 클럭 동기화 중...",
-        "seeking": "시작 시점 탐색 중...",
-        "rendering": "프레임 렌더링 중...",
-        "done": "인코더 스트림 정리 중...",
-        "mixing_audio": "오디오 정밀 믹싱 중...",
-        "muxing": "최종 영상 합성 중...",
-        "completed": "렌더링 완료",
-        "cancelled": "렌더링 중단됨",
+    STAGE_VERB_KEYS = {
+        "launching": "rc.v_launching",
+        "loading_scene": "rc.v_loading_scene",
+        "loading_level": "rc.v_loading_level",
+        "starting_playback": "rc.v_starting_playback",
+        "seeking": "rc.v_seeking",
+        "rendering": "rc.v_rendering",
+        "done": "rc.v_done",
+        "mixing_audio": "rc.v_mixing_audio",
+        "muxing": "rc.v_muxing",
+        "completed": "rc.v_completed",
+        "cancelled": "rc.v_cancelled",
     }
 
-    STAGE_META_HINTS = {
-        "launching": "Steam ADOFAI 초기화",
-        "loading_scene": "오프스크린 RT 준비",
-        "loading_level": "장식 · 셰이더 로드",
-        "starting_playback": "결정론적 CFR 고정",
-        "done": "인코더 버퍼 플러시",
-        "mixing_audio": "원곡 · 타격음 합성",
-        "muxing": "MP4/MKV 컨테이너 출력",
+    STAGE_HINT_KEYS = {
+        "launching": "rc.h_launching",
+        "loading_scene": "rc.h_loading_scene",
+        "loading_level": "rc.h_loading_level",
+        "starting_playback": "rc.h_starting_playback",
+        "done": "rc.h_done",
+        "mixing_audio": "rc.h_mixing_audio",
+        "muxing": "rc.h_muxing",
     }
 
     def __init__(self, optimize_render: bool = False, start_sec: float = 0.0, parent: Optional[QWidget] = None) -> None:
@@ -167,16 +168,16 @@ class ClaudeConsoleBar(QFrame):
         self.spinner = ClaudeSpinnerGlyph()
         lay.addWidget(self.spinner)
 
-        self.lbl_verb = QLabel("렌더 엔진 실행 중...")
+        self.lbl_verb = QLabel(tr("rc.v_launching"))
         self.lbl_verb.setStyleSheet(
-            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; "
+            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; font-weight: 600; background: transparent;"
         )
         lay.addWidget(self.lbl_verb)
 
-        self.lbl_meta = QLabel("(0s · Steam ADOFAI 초기화 · esc to cancel)")
+        self.lbl_meta = QLabel(f"(0s · {tr('rc.h_launching')} · {tr('rc.esc_cancel')})")
         self.lbl_meta.setStyleSheet(
-            f"color: #8c8c8c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; "
+            f"color: #8c8c8c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; background: transparent;"
         )
         lay.addWidget(self.lbl_meta, 1)
@@ -191,30 +192,30 @@ class ClaudeConsoleBar(QFrame):
         active: bool,
         song_sec: float = 0.0,
     ) -> None:
-        verb = self.STAGE_VERBS.get(stage, "작업 처리 중...")
+        vkey = self.STAGE_VERB_KEYS.get(stage, "rc.v_working")
         if stage == "loading_level" and self._optimize_render:
-            verb = "레벨 · 최적화 프록시 준비 중..."
-        self.lbl_verb.setText(verb)
+            vkey = "rc.v_loading_level_opt"
+        self.lbl_verb.setText(tr(vkey))
         if not active:
             if stage == "completed":
                 self.spinner.set_state("done")
                 self.lbl_verb.setStyleSheet(
-                    "color: #6ab07c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; "
+                    "color: #6ab07c; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
                     "font-size: 12px; font-weight: 600; background: transparent;"
                 )
-                self.lbl_meta.setText(f"({int(elapsed_s)}s · {frames:,}프레임 완료)")
+                self.lbl_meta.setText(f"({int(elapsed_s)}s · {tr('rc.frames_done', n=frames)})")
             else:
                 self.spinner.set_state("error")
                 self.lbl_verb.setStyleSheet(
-                    "color: #d9534f; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; "
+                    "color: #d9534f; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
                     "font-size: 12px; font-weight: 600; background: transparent;"
                 )
-                self.lbl_meta.setText(f"({int(elapsed_s)}s · 중단됨)")
+                self.lbl_meta.setText(f"({int(elapsed_s)}s · {tr('rc.stopped_word')})")
             return
 
         self.spinner.set_state("active")
         self.lbl_verb.setStyleSheet(
-            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', monospace; "
+            f"color: {ACCENT_STATUS_BLUE}; font-family: 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Yu Gothic UI', monospace; "
             f"font-size: 12px; font-weight: 600; background: transparent;"
         )
         parts = [f"{int(elapsed_s)}s"]
@@ -228,12 +229,12 @@ class ClaudeConsoleBar(QFrame):
             if rfps > 0.1:
                 parts.append(f"{rfps:.1f} fps")
         else:
-            hint = self.STAGE_META_HINTS.get(stage, "")
+            hkey = self.STAGE_HINT_KEYS.get(stage, "")
             if stage == "loading_level" and self._optimize_render:
-                hint = "장식 컬링 · LOD 인덱싱"
-            if hint:
-                parts.append(hint)
-        parts.append("esc to cancel")
+                hkey = "rc.h_loading_level_opt"
+            if hkey:
+                parts.append(tr(hkey))
+        parts.append(tr("rc.esc_cancel"))
         self.lbl_meta.setText("(" + " · ".join(parts) + ")")
 
 
@@ -253,7 +254,7 @@ class RenderCardDialog(QDialog):
         auto_start: bool = True,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("렌더링 진행 중")
+        self.setWindowTitle(tr("rc.title_running"))
         self.setMinimumWidth(620)
         self.resize(620, 290)
         self.setModal(True)
@@ -323,15 +324,15 @@ class RenderCardDialog(QDialog):
         ml.setContentsMargins(14, 10, 14, 10)
         ml.setSpacing(16)
 
-        self.lbl_pct = self._add_metric(ml, "진행률", "0.0%")
+        self.lbl_pct = self._add_metric(ml, tr("rc.metric_pct"), "0.0%")
         self._add_vsep(ml)
-        self.lbl_rem = self._add_metric(ml, "예상 남은 시간", format_duration_korean(self._initial_est_sec))
+        self.lbl_rem = self._add_metric(ml, tr("rc.metric_rem"), format_duration_korean(self._initial_est_sec))
         self._add_vsep(ml)
         eta_clk = (datetime.datetime.now() + datetime.timedelta(seconds=self._initial_est_sec)).strftime("%H:%M:%S")
-        self.lbl_eta_clock = self._add_metric(ml, "예상 종료 시각", eta_clk, accent=True)
+        self.lbl_eta_clock = self._add_metric(ml, tr("rc.metric_eta"), eta_clk, accent=True)
         root.addWidget(metrics_card)
 
-        self.lbl_detail = QLabel("오프라인 렌더 백엔드를 시작하는 중입니다...")
+        self.lbl_detail = QLabel(tr("rc.detail_init"))
         self.lbl_detail.setObjectName("muted")
         root.addWidget(self.lbl_detail)
 
@@ -348,15 +349,15 @@ class RenderCardDialog(QDialog):
 
         # Footer controls
         btn_row = QHBoxLayout()
-        self.btn_log = QPushButton("콘솔 로그 ▾")
+        self.btn_log = QPushButton(tr("rc.btn_log_show"))
         self.btn_log.setObjectName("chipBtn")
         self.btn_log.clicked.connect(self._toggle_log)
 
-        self.btn_open_dir = QPushButton("출력 폴더 열기")
+        self.btn_open_dir = QPushButton(tr("rc.btn_open_dir"))
         self.btn_open_dir.setEnabled(False)
         self.btn_open_dir.clicked.connect(self._open_output)
 
-        self.btn_cancel = QPushButton("취소 (Esc)")
+        self.btn_cancel = QPushButton(tr("rc.btn_cancel"))
         self.btn_cancel.setObjectName("dangerBtn")
         self.btn_cancel.clicked.connect(self._on_cancel_or_close)
 
@@ -390,11 +391,11 @@ class RenderCardDialog(QDialog):
     def _toggle_log(self) -> None:
         if self.txt_log.isVisible():
             self.txt_log.hide()
-            self.btn_log.setText("콘솔 로그 ▾")
+            self.btn_log.setText(tr("rc.btn_log_show"))
             self.resize(self.width(), 290)
         else:
             self.txt_log.show()
-            self.btn_log.setText("콘솔 로그 ▴")
+            self.btn_log.setText(tr("rc.btn_log_hide"))
             self.resize(self.width(), 440)
 
     def _start_worker(self) -> None:
@@ -440,7 +441,7 @@ class RenderCardDialog(QDialog):
             eta_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
             self.lbl_eta_clock.setText(eta_dt.strftime("%H:%M:%S"))
         elif p.stage in ("mixing_audio", "muxing"):
-            self.lbl_rem.setText("마무리 중")
+            self.lbl_rem.setText(tr("rc.finishing"))
 
     def _on_finished(self, res: RenderResult) -> None:
         self._running = False
@@ -449,7 +450,7 @@ class RenderCardDialog(QDialog):
         elapsed = time.monotonic() - self._started_mono
 
         if res.success:
-            self.setWindowTitle("렌더링 완료")
+            self.setWindowTitle(tr("rc.title_done"))
             self.progress.setValue(1000)
             self.progress.setStyleSheet(
                 "QProgressBar { background: #131313; border: 1px solid #2b2b2b; border-radius: 3px; }"
@@ -457,27 +458,27 @@ class RenderCardDialog(QDialog):
             )
             self.console_bar.update_console("completed", elapsed, res.frames, res.frames, 0.0, active=False)
             self.lbl_pct.setText("100.0%")
-            self.lbl_rem.setText("완료")
+            self.lbl_rem.setText(tr("rc.done_word"))
             self.lbl_eta_clock.setText(datetime.datetime.now().strftime("%H:%M:%S"))
             fb = f" · {res.fallback_note}" if res.fallback_note else ""
-            self.lbl_detail.setText(f"{res.frames:,}프레임 ({res.video_sec:.1f}s) · {res.encoder_used}{fb}")
+            self.lbl_detail.setText(tr("rc.done_detail", frames=res.frames, sec=res.video_sec, enc=res.encoder_used, fb=fb))
             self.btn_open_dir.setEnabled(True)
             self.btn_cancel.setObjectName("primaryBtn")
-            self.btn_cancel.setText("닫기")
+            self.btn_cancel.setText(tr("btn.close"))
             self.btn_cancel.style().unpolish(self.btn_cancel)
             self.btn_cancel.style().polish(self.btn_cancel)
         else:
-            self.setWindowTitle("렌더링 중단")
+            self.setWindowTitle(tr("rc.title_stop"))
             self.console_bar.update_console("cancelled", elapsed, self._last_progress.frames, self._target_frames, 0.0, active=False)
             self.lbl_rem.setText("-")
-            first_line = (res.error or "렌더링이 중단되었습니다.").splitlines()[0]
+            first_line = (res.error or tr("rc.stopped_default")).splitlines()[0]
             self.lbl_detail.setText(first_line)
             if res.error:
                 self._append_log("[ERROR] " + res.error)
                 if not self.txt_log.isVisible():
                     self._toggle_log()
             self.btn_cancel.setObjectName("")
-            self.btn_cancel.setText("닫기")
+            self.btn_cancel.setText(tr("btn.close"))
             self.btn_cancel.style().unpolish(self.btn_cancel)
             self.btn_cancel.style().polish(self.btn_cancel)
 
@@ -486,8 +487,8 @@ class RenderCardDialog(QDialog):
     def _on_cancel_or_close(self) -> None:
         if self._running:
             self.btn_cancel.setEnabled(False)
-            self.btn_cancel.setText("중단 중...")
-            self._append_log("취소 요청을 전송했습니다...")
+            self.btn_cancel.setText(tr("rc.btn_cancelling"))
+            self._append_log(tr("rc.cancel_sent"))
             self.runner.cancel()
         else:
             self.accept()

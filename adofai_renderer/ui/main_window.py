@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import cv2
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..gpu_detect import HardwareCapabilities, resolve_video_encoder
+from ..i18n import LANGUAGE_NAMES, SUPPORTED_LANGUAGES, get_language, set_language, tr
 from ..level_info import AdofaiLevelInfo, parse_adofai_info
 from ..level_loader import estimate_level_duration_sec, extract_audio_waveform, resolve_level_input
 from ..paths import get_default_output_dir
@@ -330,10 +331,10 @@ class PreviewViewportWidget(QWidget):
         oc_lay.setContentsMargins(20, 16, 20, 16)
         oc_lay.setSpacing(8)
 
-        self.lbl_ov_title = QLabel("레벨을 불러와 주세요")
+        self.lbl_ov_title = QLabel(tr("vp.empty_title"))
         self.lbl_ov_title.setAlignment(Qt.AlignCenter)
         self.lbl_ov_title.setStyleSheet("color: #e2e2e2; font-size: 13px; font-weight: 600; background: transparent; border: none;")
-        self.lbl_ov_sub = QLabel(".adofai 파일, 폴더 또는 .zip 파일을 드래그하거나 파일 메뉴에서 열 수 있습니다.")
+        self.lbl_ov_sub = QLabel(tr("vp.empty_sub"))
         self.lbl_ov_sub.setAlignment(Qt.AlignCenter)
         self.lbl_ov_sub.setStyleSheet("color: #909090; font-size: 11px; background: transparent; border: none;")
 
@@ -350,9 +351,9 @@ class PreviewViewportWidget(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setAlignment(Qt.AlignCenter)
         btn_row.setSpacing(8)
-        self.btn_ov_open = QPushButton("레벨 열기...")
+        self.btn_ov_open = QPushButton(tr("vp.btn_open"))
         self.btn_ov_open.clicked.connect(self.request_open_level.emit)
-        self.btn_ov_preview = QPushButton("사전 미리보기 생성 (썸네일)")
+        self.btn_ov_preview = QPushButton(tr("vp.btn_preview"))
         self.btn_ov_preview.setIcon(make_icon("film", "#dcdcdc", 14))
         self.btn_ov_preview.clicked.connect(self.request_generate_preview.emit)
         self.btn_ov_preview.hide()
@@ -364,6 +365,13 @@ class PreviewViewportWidget(QWidget):
         oc_lay.addWidget(self.ov_progress, 0, Qt.AlignCenter)
         oc_lay.addLayout(btn_row)
         lay.addWidget(self.overlay_card)
+
+    def retranslate_ui(self) -> None:
+        self.btn_ov_open.setText(tr("vp.btn_open"))
+        self.btn_ov_preview.setText(tr("vp.btn_preview"))
+        if self.btn_ov_open.isVisible():
+            self.lbl_ov_title.setText(tr("vp.empty_title"))
+            self.lbl_ov_sub.setText(tr("vp.empty_sub"))
 
     def clear_video(self) -> None:
         if self._cap is not None:
@@ -380,7 +388,7 @@ class PreviewViewportWidget(QWidget):
     def set_level_placeholder(self, title: str, detail: str) -> None:
         self.clear_video()
         self.lbl_ov_title.setText(title)
-        self.lbl_ov_sub.setText(detail + "\n타임라인 구간 트림용 저해상도 썸네일 미리보기를 생성할 수 있습니다.")
+        self.lbl_ov_sub.setText(detail + "\n" + tr("vp.preview_hint"))
         self.ov_progress.hide()
         self.btn_ov_open.hide()
         self.btn_ov_preview.setEnabled(True)
@@ -390,8 +398,8 @@ class PreviewViewportWidget(QWidget):
 
     def set_generating_state(self, active: bool, status_text: str = "", pct: float = 0.0) -> None:
         if active:
-            self.lbl_ov_title.setText("사전 미리보기 생성 중...")
-            self.lbl_ov_sub.setText(status_text or "저해상도 썸네일 프레임을 생성하는 중입니다.")
+            self.lbl_ov_title.setText(tr("vp.gen_title"))
+            self.lbl_ov_sub.setText(status_text or tr("vp.gen_sub_default"))
             self.ov_progress.setValue(int(round(pct * 10)))
             self.ov_progress.show()
             self.btn_ov_preview.setEnabled(False)
@@ -499,10 +507,14 @@ class ColorPickerButton(QPushButton):
         p.setPen(QPen(QColor("#111111"), 1))
         p.drawRect(chip)
         p.setPen(QColor("#dcdcdc"))
-        p.setFont(QFont("Malgun Gothic", 8))
+        p.setFont(QFont("Segoe UI", 8))
         txt = f"{self._label} {int(round(self._opacity * 100))}%"
         p.drawText(QRectF(25, 0, self.width() - 30, self.height()), Qt.AlignLeft | Qt.AlignVCenter, txt)
         p.end()
+
+    def set_label(self, label: str) -> None:
+        self._label = label
+        self.update()
 
 
 def _vsep() -> QFrame:
@@ -646,159 +658,165 @@ class MainWindow(QMainWindow):
     def _build_menubar(self) -> None:
         mb = self.menuBar()
 
-        # 파일(&F)
-        m_file = mb.addMenu("파일(&F)")
-        act_open = QAction("레벨 열기 (.adofai)...", self)
-        act_open.setShortcut(QKeySequence("Ctrl+O"))
-        act_open.triggered.connect(self._open_file_dialog)
-        m_file.addAction(act_open)
+        # File
+        self.m_file = mb.addMenu(tr("menu.file"))
+        self.act_open = QAction(tr("menu.open_level"), self)
+        self.act_open.setShortcut(QKeySequence("Ctrl+O"))
+        self.act_open.triggered.connect(self._open_file_dialog)
+        self.m_file.addAction(self.act_open)
 
-        act_folder = QAction("폴더 열기 (Open Folder)...", self)
-        act_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
-        act_folder.triggered.connect(self._open_folder_dialog)
-        m_file.addAction(act_folder)
-
-        act_zip = QAction("압축 파일 열기 (Open ZIP)...", self)
-        act_zip.setShortcut(QKeySequence("Ctrl+Alt+O"))
-        act_zip.triggered.connect(self._open_zip_dialog)
-        m_file.addAction(act_zip)
-
-        m_samples = QMenu("샘플 레벨", self)
+        self.m_samples = QMenu(tr("menu.samples"), self)
+        self.act_samples_empty: Optional[QAction] = None
         if self.preload.sample_levels:
             for _name, spath, sinfo, sdur in self.preload.sample_levels:
                 a = QAction(f"{sinfo.display_title} ({format_timecode(sdur)})", self)
                 a.triggered.connect(lambda _=False, p=spath, i=sinfo, d=sdur: self._load_level(p, i, d))
-                m_samples.addAction(a)
+                self.m_samples.addAction(a)
         else:
-            empty_a = QAction("(샘플 없음)", self)
-            empty_a.setEnabled(False)
-            m_samples.addAction(empty_a)
-        m_file.addMenu(m_samples)
+            self.act_samples_empty = QAction(tr("menu.samples_empty"), self)
+            self.act_samples_empty.setEnabled(False)
+            self.m_samples.addAction(self.act_samples_empty)
+        self.m_file.addMenu(self.m_samples)
 
-        m_file.addSeparator()
-        act_steam = QAction("Steam ADOFAI 경로 설정...", self)
-        act_steam.triggered.connect(self._browse_adofai_dir)
-        m_file.addAction(act_steam)
-        m_file.addSeparator()
-        act_quit = QAction("종료", self)
-        act_quit.setShortcut(QKeySequence("Ctrl+Q"))
-        act_quit.triggered.connect(self.close)
-        m_file.addAction(act_quit)
+        self.m_file.addSeparator()
+        self.act_steam = QAction(tr("menu.steam_dir"), self)
+        self.act_steam.triggered.connect(self._browse_adofai_dir)
+        self.m_file.addAction(self.act_steam)
+        self.m_file.addSeparator()
+        self.act_quit = QAction(tr("menu.quit"), self)
+        self.act_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        self.act_quit.triggered.connect(self.close)
+        self.m_file.addAction(self.act_quit)
 
-        # 편집(&E)
-        m_edit = mb.addMenu("편집(&E)")
-        act_in = QAction("트림 시작점 지정 (I)", self)
-        act_in.setShortcut(QKeySequence("I"))
-        act_in.triggered.connect(self._mark_in)
-        m_edit.addAction(act_in)
+        # Edit
+        self.m_edit = mb.addMenu(tr("menu.edit"))
+        self.act_in = QAction(tr("menu.mark_in"), self)
+        self.act_in.setShortcut(QKeySequence("I"))
+        self.act_in.triggered.connect(self._mark_in)
+        self.m_edit.addAction(self.act_in)
 
-        act_out = QAction("트림 종료점 지정 (O)", self)
-        act_out.setShortcut(QKeySequence("O"))
-        act_out.triggered.connect(self._mark_out)
-        m_edit.addAction(act_out)
+        self.act_out = QAction(tr("menu.mark_out"), self)
+        self.act_out.setShortcut(QKeySequence("O"))
+        self.act_out.triggered.connect(self._mark_out)
+        self.m_edit.addAction(self.act_out)
 
-        act_reset_trim = QAction("구간 전체로 초기화", self)
-        act_reset_trim.setShortcut(QKeySequence("Ctrl+0"))
-        act_reset_trim.triggered.connect(self._reset_trim)
-        m_edit.addAction(act_reset_trim)
+        self.act_reset_trim = QAction(tr("menu.reset_trim"), self)
+        self.act_reset_trim.setShortcut(QKeySequence("Ctrl+0"))
+        self.act_reset_trim.triggered.connect(self._reset_trim)
+        self.m_edit.addAction(self.act_reset_trim)
 
-        m_edit.addSeparator()
-        act_planet = QAction("행성 색상 및 불투명도 설정...", self)
-        act_planet.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        act_planet.triggered.connect(self._open_planet_dialog)
-        m_edit.addAction(act_planet)
+        self.m_edit.addSeparator()
+        self.act_planet = QAction(tr("menu.planet_cfg"), self)
+        self.act_planet.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.act_planet.triggered.connect(self._open_planet_dialog)
+        self.m_edit.addAction(self.act_planet)
 
-        act_planet_def = QAction("행성 기본값 복원 (빨강/파랑 100%)", self)
-        act_planet_def.triggered.connect(self._reset_planet_defaults)
-        m_edit.addAction(act_planet_def)
+        self.act_planet_def = QAction(tr("menu.planet_reset"), self)
+        self.act_planet_def.triggered.connect(self._reset_planet_defaults)
+        self.m_edit.addAction(self.act_planet_def)
 
-        m_edit.addSeparator()
-        act_exp_cfg = QAction("환경설정 및 리소스 상한...", self)
-        act_exp_cfg.setShortcut(QKeySequence("Ctrl+,"))
-        act_exp_cfg.triggered.connect(self._open_export_dialog)
-        m_edit.addAction(act_exp_cfg)
+        self.m_edit.addSeparator()
+        self.act_exp_cfg = QAction(tr("menu.export_cfg"), self)
+        self.act_exp_cfg.setShortcut(QKeySequence("Ctrl+,"))
+        self.act_exp_cfg.triggered.connect(self._open_export_dialog)
+        self.m_edit.addAction(self.act_exp_cfg)
 
-        # 시퀀스(&S)
-        m_seq = mb.addMenu("시퀀스(&S)")
-        act_prev = QAction("사전 미리보기 생성 (썸네일)", self)
-        act_prev.setShortcut(QKeySequence("Ctrl+P"))
-        act_prev.triggered.connect(lambda: self._start_preview_build(force_rebuild=False))
-        m_seq.addAction(act_prev)
+        self.m_lang = QMenu(tr("menu.language"), self)
+        self._lang_group = QActionGroup(self)
+        self._lang_group.setExclusive(True)
+        self._lang_actions: dict[str, QAction] = {}
+        cur_lang = get_language()
+        for code in SUPPORTED_LANGUAGES:
+            la = QAction(LANGUAGE_NAMES[code], self)
+            la.setCheckable(True)
+            la.setChecked(code == cur_lang)
+            la.triggered.connect(lambda _=False, c=code: self._switch_language(c))
+            self._lang_group.addAction(la)
+            self.m_lang.addAction(la)
+            self._lang_actions[code] = la
+        self.m_edit.addMenu(self.m_lang)
 
-        act_prev_force = QAction("사전 미리보기 다시 생성", self)
-        act_prev_force.triggered.connect(lambda: self._start_preview_build(force_rebuild=True))
-        m_seq.addAction(act_prev_force)
+        # Sequence
+        self.m_seq = mb.addMenu(tr("menu.seq"))
+        self.act_prev = QAction(tr("menu.prev_build"), self)
+        self.act_prev.setShortcut(QKeySequence("Ctrl+P"))
+        self.act_prev.triggered.connect(lambda: self._start_preview_build(force_rebuild=False))
+        self.m_seq.addAction(self.act_prev)
 
-        m_seq.addSeparator()
-        act_seq_cfg = QAction("행성 · 시퀀스 탭 열기", self)
-        act_seq_cfg.triggered.connect(lambda: self._focus_inspector_tab(1))
-        m_seq.addAction(act_seq_cfg)
+        self.act_prev_force = QAction(tr("menu.prev_rebuild"), self)
+        self.act_prev_force.triggered.connect(lambda: self._start_preview_build(force_rebuild=True))
+        self.m_seq.addAction(self.act_prev_force)
 
-        act_clear_cache = QAction("미리보기 캐시 비우기", self)
-        act_clear_cache.triggered.connect(self._clear_preview_cache)
-        m_seq.addAction(act_clear_cache)
+        self.m_seq.addSeparator()
+        self.act_seq_cfg = QAction(tr("menu.open_seq_tab"), self)
+        self.act_seq_cfg.triggered.connect(lambda: self._focus_inspector_tab(1))
+        self.m_seq.addAction(self.act_seq_cfg)
 
-        # 보기(&V)
-        m_view = mb.addMenu("보기(&V)")
-        self.act_toggle_inspector = QAction("출력 설정 패널", self)
+        self.act_clear_cache = QAction(tr("menu.clear_cache"), self)
+        self.act_clear_cache.triggered.connect(self._clear_preview_cache)
+        self.m_seq.addAction(self.act_clear_cache)
+
+        # View
+        self.m_view = mb.addMenu(tr("menu.view"))
+        self.act_toggle_inspector = QAction(tr("menu.toggle_inspector"), self)
         self.act_toggle_inspector.setCheckable(True)
         self.act_toggle_inspector.setChecked(True)
         self.act_toggle_inspector.setShortcut(QKeySequence("Tab"))
         self.act_toggle_inspector.toggled.connect(self._toggle_inspector)
-        m_view.addAction(self.act_toggle_inspector)
+        self.m_view.addAction(self.act_toggle_inspector)
 
-        m_view.addSeparator()
-        act_zi = QAction("타임라인 확대", self)
-        act_zi.setShortcut(QKeySequence("Ctrl+="))
-        act_zi.triggered.connect(lambda: self._adjust_zoom(1.4))
-        m_view.addAction(act_zi)
+        self.m_view.addSeparator()
+        self.act_zi = QAction(tr("menu.zoom_in"), self)
+        self.act_zi.setShortcut(QKeySequence("Ctrl+="))
+        self.act_zi.triggered.connect(lambda: self._adjust_zoom(1.4))
+        self.m_view.addAction(self.act_zi)
 
-        act_zo = QAction("타임라인 축소", self)
-        act_zo.setShortcut(QKeySequence("Ctrl+-"))
-        act_zo.triggered.connect(lambda: self._adjust_zoom(0.7))
-        m_view.addAction(act_zo)
+        self.act_zo = QAction(tr("menu.zoom_out"), self)
+        self.act_zo.setShortcut(QKeySequence("Ctrl+-"))
+        self.act_zo.triggered.connect(lambda: self._adjust_zoom(0.7))
+        self.m_view.addAction(self.act_zo)
 
-        act_zf = QAction("타임라인 전체 맞추기", self)
-        act_zf.triggered.connect(lambda: self.timeline.set_zoom(1.0))
-        m_view.addAction(act_zf)
+        self.act_zf = QAction(tr("menu.zoom_fit"), self)
+        self.act_zf.triggered.connect(lambda: self.timeline.set_zoom(1.0))
+        self.m_view.addAction(self.act_zf)
 
-        # 렌더(&R)
-        m_exp = mb.addMenu("렌더(&R)")
-        act_render = QAction("렌더링 확인 및 시작...", self)
-        act_render.setShortcut(QKeySequence("Ctrl+E"))
-        act_render.triggered.connect(self._open_render_confirm)
-        m_exp.addAction(act_render)
+        # Render
+        self.m_exp = mb.addMenu(tr("menu.render"))
+        self.act_render = QAction(tr("menu.render_start"), self)
+        self.act_render.setShortcut(QKeySequence("Ctrl+E"))
+        self.act_render.triggered.connect(self._open_render_confirm)
+        self.m_exp.addAction(self.act_render)
 
-        self.act_opt_render = QAction("최적화 렌더 (실험)", self)
+        self.act_opt_render = QAction(tr("menu.opt_render"), self)
         self.act_opt_render.setCheckable(True)
         self.act_opt_render.setChecked(False)
         self.act_opt_render.toggled.connect(self._on_toggle_opt_render)
-        m_exp.addAction(self.act_opt_render)
+        self.m_exp.addAction(self.act_opt_render)
 
-        m_exp.addSeparator()
-        act_out_file = QAction("출력 파일 경로 지정...", self)
-        act_out_file.triggered.connect(self._browse_output_file)
-        m_exp.addAction(act_out_file)
+        self.m_exp.addSeparator()
+        self.act_out_file = QAction(tr("menu.out_file"), self)
+        self.act_out_file.triggered.connect(self._browse_output_file)
+        self.m_exp.addAction(self.act_out_file)
 
-        act_out_dir = QAction("출력 폴더 변경...", self)
-        act_out_dir.triggered.connect(self._browse_output_dir)
-        m_exp.addAction(act_out_dir)
+        self.act_out_dir = QAction(tr("menu.out_dir"), self)
+        self.act_out_dir.triggered.connect(self._browse_output_dir)
+        self.m_exp.addAction(self.act_out_dir)
 
-        act_open_out = QAction("출력 폴더 열기", self)
-        act_open_out.triggered.connect(self._open_output_dir)
-        m_exp.addAction(act_open_out)
+        self.act_open_out = QAction(tr("menu.open_out_dir"), self)
+        self.act_open_out.triggered.connect(self._open_output_dir)
+        self.m_exp.addAction(self.act_open_out)
 
-        # 도움말(&H)
-        m_help = mb.addMenu("도움말(&H)")
-        act_diag = QAction("하드웨어 및 인코더 진단", self)
-        act_diag.triggered.connect(self._show_hw_diagnostics)
-        m_help.addAction(act_diag)
-        act_upd = QAction("업데이트 확인...", self)
-        act_upd.triggered.connect(lambda: self._check_updates(manual=True))
-        m_help.addAction(act_upd)
-        act_about = QAction("프로그램 정보", self)
-        act_about.triggered.connect(self._show_about)
-        m_help.addAction(act_about)
+        # Help
+        self.m_help = mb.addMenu(tr("menu.help"))
+        self.act_diag = QAction(tr("menu.diag"), self)
+        self.act_diag.triggered.connect(self._show_hw_diagnostics)
+        self.m_help.addAction(self.act_diag)
+        self.act_upd = QAction(tr("menu.check_upd"), self)
+        self.act_upd.triggered.connect(lambda: self._check_updates(manual=True))
+        self.m_help.addAction(self.act_upd)
+        self.act_about = QAction(tr("menu.about"), self)
+        self.act_about.triggered.connect(self._show_about)
+        self.m_help.addAction(self.act_about)
 
     # ------------------------------------------------------------------ Workstation Layout
     def _build_workstation(self) -> None:
@@ -822,7 +840,7 @@ class MainWindow(QMainWindow):
         lp.setContentsMargins(0, 0, 0, 0)
         lp.setSpacing(0)
 
-        vp_hdr, self.lbl_vp_title, self.lbl_vp_mode = _pane_header("뷰어", "맞춤 (16:9)")
+        vp_hdr, self.lbl_vp_title, self.lbl_vp_mode = _pane_header(tr("vp.header"), tr("vp.mode_fit"))
         lp.addWidget(vp_hdr)
 
         vp_body = QHBoxLayout()
@@ -847,8 +865,8 @@ class MainWindow(QMainWindow):
         insp_outer.setContentsMargins(0, 0, 0, 0)
         insp_outer.setSpacing(0)
 
-        insp_hdr, _ih_l, self.lbl_insp_bpm = _pane_header(
-            "출력 설정", "", on_close=lambda: self.act_toggle_inspector.setChecked(False)
+        insp_hdr, self.lbl_insp_hdr, self.lbl_insp_bpm = _pane_header(
+            tr("insp.header"), "", on_close=lambda: self.act_toggle_inspector.setChecked(False)
         )
         insp_outer.addWidget(insp_hdr)
 
@@ -857,7 +875,7 @@ class MainWindow(QMainWindow):
         self.insp_tabs.setDocumentMode(False)
         insp_outer.addWidget(self.insp_tabs, 1)
 
-        # ---- Tab 1: 출력 (Export & Range) inside QScrollArea ----
+        # ---- Tab 1: Output (Export & Range) inside QScrollArea ----
         tab_out_scroll = QScrollArea()
         tab_out_scroll.setFrameShape(QFrame.NoFrame)
         tab_out_scroll.setWidgetResizable(True)
@@ -868,16 +886,16 @@ class MainWindow(QMainWindow):
         insp.setContentsMargins(9, 6, 9, 6)
         insp.setSpacing(5)
         tab_out_scroll.setWidget(tab_out_body)
-        self.insp_tabs.addTab(tab_out_scroll, "출력")
+        self.insp_tabs.addTab(tab_out_scroll, tr("insp.tab_out"))
 
         # 1) Level Identity
-        self.lbl_lvl_name = QLabel("레벨 미선택")
+        self.lbl_lvl_name = QLabel(tr("insp.no_level"))
         f_b = QFont()
         f_b.setBold(True)
         self.lbl_lvl_name.setFont(f_b)
         insp.addWidget(self.lbl_lvl_name)
 
-        self.lbl_lvl_sub = QLabel("파일 메뉴에서 .adofai, 폴더 또는 .zip을 열어주세요")
+        self.lbl_lvl_sub = QLabel(tr("insp.no_level_sub"))
         self.lbl_lvl_sub.setObjectName("muted")
         insp.addWidget(self.lbl_lvl_sub)
 
@@ -888,7 +906,8 @@ class MainWindow(QMainWindow):
         g_vid.setVerticalSpacing(5)
         g_vid.setHorizontalSpacing(7)
 
-        g_vid.addWidget(self._muted_lbl("해상도"), 0, 0)
+        self.lbl_k_res = self._muted_lbl(tr("insp.res"))
+        g_vid.addWidget(self.lbl_k_res, 0, 0)
         self.cmb_res = QComboBox()
         self.cmb_res.setFixedHeight(24)
         for _lbl, w, h in RES_PRESETS:
@@ -900,18 +919,20 @@ class MainWindow(QMainWindow):
         self.cmb_res.currentIndexChanged.connect(self._on_quick_export_changed)
         g_vid.addWidget(self.cmb_res, 0, 1, 1, 3)
 
-        g_vid.addWidget(self._muted_lbl("프레임"), 1, 0)
+        self.lbl_k_fps = self._muted_lbl(tr("insp.fps"))
+        g_vid.addWidget(self.lbl_k_fps, 1, 0)
         self.spn_fps = QSpinBox()
         self.spn_fps.setFixedHeight(24)
         self.spn_fps.setRange(24, 240)
         self.spn_fps.setValue(60)
         self.spn_fps.setSuffix(" fps")
-        self.spn_fps.setKeyboardTracking(False)  # apply typed values on Enter/focus-out, not per keystroke
-        self.spn_fps.setToolTip("24~240 사이의 값(예: 120, 144, 240)을 직접 입력할 수 있습니다 (Enter로 적용)")
+        self.spn_fps.setKeyboardTracking(False)
+        self.spn_fps.setToolTip(tr("insp.fps_tip"))
         self.spn_fps.valueChanged.connect(self._on_quick_export_changed)
         g_vid.addWidget(self.spn_fps, 1, 1, 1, 3)
 
-        g_vid.addWidget(self._muted_lbl("포맷"), 2, 0)
+        self.lbl_k_fmt = self._muted_lbl(tr("insp.fmt"))
+        g_vid.addWidget(self.lbl_k_fmt, 2, 0)
         self.cmb_fmt = QComboBox()
         self.cmb_fmt.setFixedHeight(24)
         self.cmb_fmt.addItem("MP4", "mp4")
@@ -919,7 +940,8 @@ class MainWindow(QMainWindow):
         self.cmb_fmt.currentIndexChanged.connect(self._on_quick_export_changed)
         g_vid.addWidget(self.cmb_fmt, 2, 1)
 
-        g_vid.addWidget(self._muted_lbl("코덱"), 2, 2)
+        self.lbl_k_codec = self._muted_lbl(tr("insp.codec"))
+        g_vid.addWidget(self.lbl_k_codec, 2, 2)
         self.cmb_codec = QComboBox()
         self.cmb_codec.setFixedHeight(24)
         self.cmb_codec.addItem("H.264", "h264")
@@ -927,13 +949,14 @@ class MainWindow(QMainWindow):
         self.cmb_codec.currentIndexChanged.connect(self._on_quick_export_changed)
         g_vid.addWidget(self.cmb_codec, 2, 3)
 
-        g_vid.addWidget(self._muted_lbl("오디오"), 3, 0)
+        self.lbl_k_audio = self._muted_lbl(tr("insp.audio"))
+        g_vid.addWidget(self.lbl_k_audio, 3, 0)
         aud_row = QHBoxLayout()
         aud_row.setSpacing(12)
-        self.chk_bgm = QCheckBox("배경음악")
+        self.chk_bgm = QCheckBox(tr("insp.bgm"))
         self.chk_bgm.setChecked(True)
         self.chk_bgm.toggled.connect(self._on_quick_export_changed)
-        self.chk_hit = QCheckBox("타격음")
+        self.chk_hit = QCheckBox(tr("insp.hitsound"))
         self.chk_hit.setChecked(True)
         self.chk_hit.toggled.connect(self._on_quick_export_changed)
         aud_row.addWidget(self.chk_bgm)
@@ -949,11 +972,11 @@ class MainWindow(QMainWindow):
 
         # 3) Interactive Trim Range (unified MM:SS.d TimecodeSpinBox)
         rng_hdr = QHBoxLayout()
-        lbl_rng = QLabel("렌더 구간")
-        lbl_rng.setObjectName("sectionHdr")
-        rng_hdr.addWidget(lbl_rng)
+        self.lbl_rng = QLabel(tr("insp.range"))
+        self.lbl_rng.setObjectName("sectionHdr")
+        rng_hdr.addWidget(self.lbl_rng)
         rng_hdr.addStretch(1)
-        self.btn_reset_trim = QPushButton("전체 복원")
+        self.btn_reset_trim = QPushButton(tr("insp.reset_full"))
         self.btn_reset_trim.setObjectName("chipBtn")
         self.btn_reset_trim.setFixedHeight(20)
         self.btn_reset_trim.clicked.connect(self._reset_trim)
@@ -963,7 +986,8 @@ class MainWindow(QMainWindow):
 
         g_trim = QGridLayout()
         g_trim.setHorizontalSpacing(5)
-        g_trim.addWidget(self._muted_lbl("시작"), 0, 0)
+        self.lbl_k_start = self._muted_lbl(tr("insp.start"))
+        g_trim.addWidget(self.lbl_k_start, 0, 0)
         self.spn_in = TimecodeSpinBox()
         self.spn_in.setFixedHeight(23)
         self.spn_in.setMinimumWidth(84)
@@ -971,7 +995,8 @@ class MainWindow(QMainWindow):
         self.spn_in.valueChanged.connect(self._on_trim_spin_changed)
         g_trim.addWidget(self.spn_in, 0, 1)
 
-        g_trim.addWidget(self._muted_lbl("종료"), 0, 2)
+        self.lbl_k_end = self._muted_lbl(tr("insp.end"))
+        g_trim.addWidget(self.lbl_k_end, 0, 2)
         self.spn_out = TimecodeSpinBox()
         self.spn_out.setFixedHeight(23)
         self.spn_out.setMinimumWidth(84)
@@ -988,7 +1013,8 @@ class MainWindow(QMainWindow):
         g_out = QGridLayout()
         g_out.setVerticalSpacing(4)
         g_out.setHorizontalSpacing(5)
-        g_out.addWidget(self._muted_lbl("파일명"), 0, 0)
+        self.lbl_k_fname = self._muted_lbl(tr("insp.filename"))
+        g_out.addWidget(self.lbl_k_fname, 0, 0)
         self.ed_output_name = QLineEdit()
         self.ed_output_name.setFixedHeight(23)
         self.ed_output_name.setMinimumWidth(80)
@@ -996,7 +1022,8 @@ class MainWindow(QMainWindow):
         self.ed_output_name.editingFinished.connect(self._on_output_name_edited)
         g_out.addWidget(self.ed_output_name, 0, 1, 1, 2)
 
-        g_out.addWidget(self._muted_lbl("폴더"), 1, 0)
+        self.lbl_k_dir = self._muted_lbl(tr("insp.folder"))
+        g_out.addWidget(self.lbl_k_dir, 1, 0)
         self.ed_out_dir = QLineEdit()
         self.ed_out_dir.setFixedHeight(23)
         self.ed_out_dir.setMinimumWidth(80)
@@ -1004,12 +1031,12 @@ class MainWindow(QMainWindow):
         self.ed_out_dir.setStyleSheet("color: #9e9e9e; font-size: 11px;")
         g_out.addWidget(self.ed_out_dir, 1, 1)
 
-        btn_browse_dir = QPushButton("...")
-        btn_browse_dir.setFixedSize(28, 23)
-        btn_browse_dir.setStyleSheet("padding: 0px;")
-        btn_browse_dir.setToolTip("출력 폴더 변경")
-        btn_browse_dir.clicked.connect(self._browse_output_dir)
-        g_out.addWidget(btn_browse_dir, 1, 2)
+        self.btn_browse_dir = QPushButton("...")
+        self.btn_browse_dir.setFixedSize(28, 23)
+        self.btn_browse_dir.setStyleSheet("padding: 0px;")
+        self.btn_browse_dir.setToolTip(tr("insp.folder_tip"))
+        self.btn_browse_dir.clicked.connect(self._browse_output_dir)
+        g_out.addWidget(self.btn_browse_dir, 1, 2)
         g_out.setColumnStretch(1, 1)
         insp.addLayout(g_out)
 
@@ -1023,14 +1050,14 @@ class MainWindow(QMainWindow):
         ge.setContentsMargins(8, 5, 8, 5)
         ge.setVerticalSpacing(3)
         ge.setHorizontalSpacing(8)
-        self.val_est_dur = self._add_est_row(ge, 0, "출력 길이", "-")
-        self.val_est_size = self._add_est_row(ge, 1, "예상 용량", "-")
-        self.val_est_time = self._add_est_row(ge, 2, "예상 시간", "-")
+        self.lbl_est_dur, self.val_est_dur = self._add_est_row(ge, 0, tr("insp.est_dur"), "-")
+        self.lbl_est_size, self.val_est_size = self._add_est_row(ge, 1, tr("insp.est_size"), "-")
+        self.lbl_est_time, self.val_est_time = self._add_est_row(ge, 2, tr("insp.est_time"), "-")
         ge.setColumnStretch(1, 1)
         insp.addWidget(est_frame)
         insp.addStretch(1)
 
-        # ---- Tab 2: 행성 · 시퀀스 inside QScrollArea ----
+        # ---- Tab 2: Planets & Sequence inside QScrollArea ----
         tab_seq_scroll = QScrollArea()
         tab_seq_scroll.setFrameShape(QFrame.NoFrame)
         tab_seq_scroll.setWidgetResizable(True)
@@ -1041,54 +1068,55 @@ class MainWindow(QMainWindow):
         slay.setContentsMargins(10, 8, 10, 8)
         slay.setSpacing(7)
         tab_seq_scroll.setWidget(tab_seq_body)
-        self.insp_tabs.addTab(tab_seq_scroll, "행성 · 시퀀스")
+        self.insp_tabs.addTab(tab_seq_scroll, tr("insp.tab_seq"))
 
-        lbl_pl_hdr = QLabel("행성 색상 및 불투명도")
-        lbl_pl_hdr.setObjectName("sectionHdr")
-        slay.addWidget(lbl_pl_hdr)
+        self.lbl_pl_hdr = QLabel(tr("insp.planet_hdr"))
+        self.lbl_pl_hdr.setObjectName("sectionHdr")
+        slay.addWidget(self.lbl_pl_hdr)
 
         pl_row = QHBoxLayout()
         pl_row.setSpacing(6)
-        self.btn_red_picker = ColorPickerButton("불", "#FF0000", 1.0)
+        self.btn_red_picker = ColorPickerButton(tr("insp.fire"), "#FF0000", 1.0)
         self.btn_red_picker.setFixedHeight(26)
-        self.btn_red_picker.setToolTip("불 행성 색상 및 불투명도 설정 (클릭하여 편집)")
+        self.btn_red_picker.setToolTip(tr("insp.fire_tip"))
         self.btn_red_picker.clicked.connect(self._open_planet_dialog)
-        self.btn_blue_picker = ColorPickerButton("얼음", "#0000FF", 1.0)
+        self.btn_blue_picker = ColorPickerButton(tr("insp.ice"), "#0000FF", 1.0)
         self.btn_blue_picker.setFixedHeight(26)
-        self.btn_blue_picker.setToolTip("얼음 행성 색상 및 불투명도 설정 (클릭하여 편집)")
+        self.btn_blue_picker.setToolTip(tr("insp.ice_tip"))
         self.btn_blue_picker.clicked.connect(self._open_planet_dialog)
         pl_row.addWidget(self.btn_red_picker, 1)
         pl_row.addWidget(self.btn_blue_picker, 1)
         slay.addLayout(pl_row)
 
-        btn_pl_rst = QPushButton("기본값 복원 (순수 빨강/파랑 100%)")
-        btn_pl_rst.setFixedHeight(24)
-        btn_pl_rst.clicked.connect(self._reset_planet_defaults)
-        slay.addWidget(btn_pl_rst)
+        self.btn_pl_rst = QPushButton(tr("insp.planet_reset_btn"))
+        self.btn_pl_rst.setFixedHeight(24)
+        self.btn_pl_rst.clicked.connect(self._reset_planet_defaults)
+        slay.addWidget(self.btn_pl_rst)
 
         slay.addWidget(_hsep())
 
-        lbl_seq_hdr = QLabel("시퀀스")
-        lbl_seq_hdr.setObjectName("sectionHdr")
-        slay.addWidget(lbl_seq_hdr)
+        self.lbl_seq_hdr = QLabel(tr("insp.seq_hdr"))
+        self.lbl_seq_hdr.setObjectName("sectionHdr")
+        slay.addWidget(self.lbl_seq_hdr)
 
         g_seq = QGridLayout()
         g_seq.setHorizontalSpacing(8)
         g_seq.setVerticalSpacing(5)
-        g_seq.addWidget(self._muted_lbl("종료 여백"), 0, 0)
+        self.lbl_k_pad = self._muted_lbl(tr("insp.end_pad"))
+        g_seq.addWidget(self.lbl_k_pad, 0, 0)
         self.spn_end_pad = QDoubleSpinBox()
         self.spn_end_pad.setFixedHeight(24)
         self.spn_end_pad.setRange(0.0, 15.0)
         self.spn_end_pad.setDecimals(1)
         self.spn_end_pad.setSingleStep(0.5)
-        self.spn_end_pad.setSuffix(" 초")
+        self.spn_end_pad.setSuffix(tr("insp.sec_suffix"))
         self.spn_end_pad.setValue(2.0)
         self.spn_end_pad.valueChanged.connect(self._on_seq_quick_changed)
         g_seq.addWidget(self.spn_end_pad, 0, 1)
         g_seq.setColumnStretch(1, 1)
         slay.addLayout(g_seq)
 
-        self.chk_hide_cd_quick = QCheckBox("시작 카운트다운 숨기기")
+        self.chk_hide_cd_quick = QCheckBox(tr("insp.hide_cd"))
         self.chk_hide_cd_quick.setChecked(True)
         self.chk_hide_cd_quick.toggled.connect(self._on_seq_quick_changed)
         slay.addWidget(self.chk_hide_cd_quick)
@@ -1101,12 +1129,12 @@ class MainWindow(QMainWindow):
         act_row = QHBoxLayout(footer_bar)
         act_row.setContentsMargins(10, 7, 10, 8)
         act_row.setSpacing(6)
-        self.btn_adv = QPushButton("세부 설정...")
+        self.btn_adv = QPushButton(tr("insp.btn_adv"))
         self.btn_adv.setFixedHeight(28)
-        self.btn_adv.setToolTip("하드웨어·GPU/RAM/CPU 상한·저사양 안전장치·최적화 렌더 설정 (Ctrl+,)")
+        self.btn_adv.setToolTip(tr("insp.btn_adv_tip"))
         self.btn_adv.clicked.connect(self._open_export_dialog)
 
-        self.btn_render = QPushButton("렌더링...")
+        self.btn_render = QPushButton(tr("insp.btn_render"))
         self.btn_render.setObjectName("primaryBtn")
         self.btn_render.setFixedHeight(28)
         self.btn_render.clicked.connect(self._open_render_confirm)
@@ -1130,7 +1158,7 @@ class MainWindow(QMainWindow):
         dl.setContentsMargins(0, 0, 0, 0)
         dl.setSpacing(0)
 
-        tl_hdr, _th_l, self.lbl_tl_range = _pane_header("타임라인", "전체 구간")
+        tl_hdr, self.lbl_tl_hdr, self.lbl_tl_range = _pane_header(tr("tl.header"), tr("tl.full_range"))
         dl.addWidget(tl_hdr)
 
         inner_tl = QVBoxLayout()
@@ -1148,26 +1176,26 @@ class MainWindow(QMainWindow):
         self.lbl_tc.setAlignment(Qt.AlignCenter)
         tr_row.addWidget(self.lbl_tc)
 
-        self.lbl_frame_num = QLabel("0 프레임")
+        self.lbl_frame_num = QLabel(tr("tl.frame_num", n=0))
         self.lbl_frame_num.setStyleSheet("color: #909090; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
         self.lbl_frame_num.setMinimumWidth(72)
         tr_row.addWidget(self.lbl_frame_num)
 
         tr_row.addWidget(_vsep())
 
-        self.btn_to_start = self._make_tool_btn("start", "처음으로 (Home)", self._jump_start)
-        self.btn_step_back = self._make_tool_btn("step_back", "이전 프레임 (Left)", lambda: self._step_frame(-1))
-        self.btn_play = self._make_tool_btn("play", "재생 / 일시정지 (Space)", self._toggle_play)
+        self.btn_to_start = self._make_tool_btn("start", tr("tl.tip_start"), self._jump_start)
+        self.btn_step_back = self._make_tool_btn("step_back", tr("tl.tip_step_back"), lambda: self._step_frame(-1))
+        self.btn_play = self._make_tool_btn("play", tr("tl.tip_play"), self._toggle_play)
         self.btn_play.setFixedWidth(30)
-        self.btn_step_fwd = self._make_tool_btn("step_fwd", "다음 프레임 (Right)", lambda: self._step_frame(1))
-        self.btn_to_end = self._make_tool_btn("end", "끝으로 (End)", self._jump_end)
+        self.btn_step_fwd = self._make_tool_btn("step_fwd", tr("tl.tip_step_fwd"), lambda: self._step_frame(1))
+        self.btn_to_end = self._make_tool_btn("end", tr("tl.tip_end"), self._jump_end)
         for b in (self.btn_to_start, self.btn_step_back, self.btn_play, self.btn_step_fwd, self.btn_to_end):
             tr_row.addWidget(b)
 
         tr_row.addWidget(_vsep())
 
-        self.btn_mark_in = self._make_tool_btn("mark_in", "트림 시작점 지정 (I)", self._mark_in)
-        self.btn_mark_out = self._make_tool_btn("mark_out", "트림 종료점 지정 (O)", self._mark_out)
+        self.btn_mark_in = self._make_tool_btn("mark_in", tr("tl.tip_mark_in"), self._mark_in)
+        self.btn_mark_out = self._make_tool_btn("mark_out", tr("tl.tip_mark_out"), self._mark_out)
         tr_row.addWidget(self.btn_mark_in)
         tr_row.addWidget(self.btn_mark_out)
 
@@ -1181,14 +1209,14 @@ class MainWindow(QMainWindow):
         self.cmb_speed.currentIndexChanged.connect(self._on_speed_changed)
         tr_row.addWidget(self.cmb_speed)
 
-        self.btn_mute = self._make_tool_btn("volume_on", "미리보기 오디오 음소거", self._toggle_mute)
+        self.btn_mute = self._make_tool_btn("volume_on", tr("tl.tip_mute"), self._toggle_mute)
         tr_row.addWidget(self.btn_mute)
 
         self.sld_vol = QSlider(Qt.Horizontal)
         self.sld_vol.setRange(0, 100)
         self.sld_vol.setValue(75)
         self.sld_vol.setFixedWidth(72)
-        self.sld_vol.setToolTip("미리보기 볼륨")
+        self.sld_vol.setToolTip(tr("tl.tip_vol"))
         self.sld_vol.valueChanged.connect(self._on_volume_changed)
         tr_row.addWidget(self.sld_vol)
 
@@ -1204,7 +1232,7 @@ class MainWindow(QMainWindow):
         self.sld_zoom.setRange(0, 70)
         self.sld_zoom.setValue(0)
         self.sld_zoom.setFixedWidth(84)
-        self.sld_zoom.setToolTip("타임라인 확대/축소 (휠 스크롤 지원)")
+        self.sld_zoom.setToolTip(tr("tl.tip_zoom"))
         self.sld_zoom.valueChanged.connect(self._on_zoom_slider_changed)
         tr_row.addWidget(self.sld_zoom)
 
@@ -1220,11 +1248,11 @@ class MainWindow(QMainWindow):
         self.lbl_zoom_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         tr_row.addWidget(self.lbl_zoom_val)
 
-        btn_fit = QPushButton("맞춤")
-        btn_fit.setObjectName("chipBtn")
-        btn_fit.setFixedHeight(22)
-        btn_fit.clicked.connect(lambda: self.timeline.set_zoom(1.0))
-        tr_row.addWidget(btn_fit)
+        self.btn_fit = QPushButton(tr("tl.btn_fit"))
+        self.btn_fit.setObjectName("chipBtn")
+        self.btn_fit.setFixedHeight(22)
+        self.btn_fit.clicked.connect(lambda: self.timeline.set_zoom(1.0))
+        tr_row.addWidget(self.btn_fit)
 
         inner_tl.addLayout(tr_row)
 
@@ -1260,14 +1288,14 @@ class MainWindow(QMainWindow):
         l.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         return l
 
-    def _add_est_row(self, grid: QGridLayout, row: int, key: str, val: str) -> QLabel:
+    def _add_est_row(self, grid: QGridLayout, row: int, key: str, val: str) -> tuple[QLabel, QLabel]:
         lk = self._muted_lbl(key)
         lv = QLabel(val)
         lv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lv.setStyleSheet("font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: #d6d6d6;")
         grid.addWidget(lk, row, 0)
         grid.addWidget(lv, row, 1)
-        return lv
+        return lk, lv
 
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
@@ -1277,7 +1305,7 @@ class MainWindow(QMainWindow):
         self.sb_enc = QLabel()
         self.sb_engine = QLabel()
         self.sb_chart = QLabel()
-        self.sb_state = QLabel("준비")
+        self.sb_state = QLabel(tr("sb.ready"))
         self.sb_state.setContentsMargins(0, 0, 10, 0)
 
         sb.addWidget(self.sb_enc, 1)
@@ -1333,36 +1361,23 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(ev)
 
-    # ------------------------------------------------------------------ Level Import
+    # ------------------------------------------------------------------ Level Import (Unified Auto-Format)
     def _open_file_dialog(self) -> None:
         start_dir = os.path.join(PROJECT_ROOT, "level")
         if not os.path.isdir(start_dir):
             start_dir = PROJECT_ROOT
         path, _ = QFileDialog.getOpenFileName(
-            self, "ADOFAI 레벨 열기", start_dir, "ADOFAI Level (*.adofai *.zip);;All Files (*)"
+            self, tr("dlg.open_title"), start_dir, tr("dlg.open_filter")
         )
         if path:
             self._import_any_path(path)
-
-    def _open_folder_dialog(self) -> None:
-        start_dir = os.path.join(PROJECT_ROOT, "level")
-        if not os.path.isdir(start_dir):
-            start_dir = PROJECT_ROOT
-        folder = QFileDialog.getExistingDirectory(self, "레벨 폴더 열기 (Open Folder)", start_dir)
-        if folder:
-            self._import_any_path(folder)
-
-    def _open_zip_dialog(self) -> None:
-        zpath, _ = QFileDialog.getOpenFileName(self, "압축 레벨 열기 (Open ZIP)", PROJECT_ROOT, "ZIP Archive (*.zip)")
-        if zpath:
-            self._import_any_path(zpath)
 
     def _import_any_path(self, raw_path: str) -> None:
         try:
             resolved = resolve_level_input(raw_path)
             self._load_level(resolved)
         except Exception as ex:
-            QMessageBox.warning(self, "레벨 불러오기 실패", str(ex))
+            QMessageBox.warning(self, tr("dlg.load_fail_title"), str(ex))
 
     def _load_level(
         self,
@@ -1393,9 +1408,15 @@ class MainWindow(QMainWindow):
         self.lbl_zoom_val.setText("100%")
 
         self.setWindowTitle(f"{self.level_info.display_title} — ADOFAI PV Renderer")
-        self.lbl_vp_title.setText(f"뷰어: {os.path.basename(self.level_path)}")
-        self.lbl_vp_mode.setText("미리보기 없음")
-        detail = f"BPM {self.level_info.bpm:g}, 타일 {self.level_info.tile_count:,}, 장식 {self.level_info.decoration_count:,}, 필터 {len(self.level_info.filters)}종"
+        self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
+        self.lbl_vp_mode.setText(tr("vp.mode_none"))
+        detail = tr(
+            "vp.level_detail",
+            bpm=self.level_info.bpm,
+            tiles=self.level_info.tile_count,
+            decos=self.level_info.decoration_count,
+            filts=len(self.level_info.filters),
+        )
         self.viewport.set_level_placeholder(self.level_info.display_title, detail)
 
         self._sync_default_output_path()
@@ -1456,14 +1477,14 @@ class MainWindow(QMainWindow):
             self._audio_player.setSource(QUrl.fromLocalFile(video_path))
             self._start_waveform_worker(video_path)
             self.viewport.seek_seconds(self.timeline.playhead)
-            self.lbl_vp_mode.setText("맞춤 (16:9)")
+            self.lbl_vp_mode.setText(tr("vp.mode_fit"))
             self._update_timecode_label()
             self._refresh_trim_summary()
 
     # ------------------------------------------------------------------ Rough Preview Builder
     def _start_preview_build(self, force_rebuild: bool = False) -> None:
         if not self.level_path or not os.path.isfile(self.level_path):
-            QMessageBox.information(self, "레벨 미선택", "먼저 .adofai 레벨을 열어주세요.")
+            QMessageBox.information(self, tr("dlg.no_level_title"), tr("dlg.no_level_preview_msg"))
             return
         if self._preview_worker is not None and self._preview_worker.isRunning():
             return
@@ -1473,8 +1494,8 @@ class MainWindow(QMainWindow):
             self._audio_player.setSource(QUrl())
             self.viewport.clear_video()
         self.btn_render.setEnabled(False)
-        self.sb_state.setText("미리보기 생성 중")
-        self.viewport.set_generating_state(True, "저해상도 썸네일 미리보기 엔진 준비 중...", 5.0)
+        self.sb_state.setText(tr("sb.previewing"))
+        self.viewport.set_generating_state(True, tr("vp.gen_engine_prep"), 5.0)
 
         self._preview_runner = RenderRunner(caps=self.caps)
         self._preview_worker = PreviewBuildWorker(
@@ -1498,12 +1519,12 @@ class MainWindow(QMainWindow):
     def _on_preview_done(self, res: PreviewResult) -> None:
         self.btn_render.setEnabled(True)
         self.viewport.set_generating_state(False)
-        self.sb_state.setText("준비")
+        self.sb_state.setText(tr("sb.ready"))
         if res.success:
             self._apply_preview_video(res.video_path, res.filmstrip_path, res.duration_sec)
-            self.statusBar().showMessage("사전 미리보기가 로드되었습니다.", 4000)
+            self.statusBar().showMessage(tr("sb.preview_loaded"), 4000)
         else:
-            QMessageBox.warning(self, "미리보기 생성 실패", res.error or "미리보기를 생성하지 못했습니다.")
+            QMessageBox.warning(self, tr("dlg.preview_fail_title"), res.error or tr("dlg.preview_fail_default"))
 
     def _clear_preview_cache(self) -> None:
         self._stop_playback()
@@ -1513,9 +1534,15 @@ class MainWindow(QMainWindow):
             shutil.rmtree(PREVIEW_CACHE_DIR, ignore_errors=True)
             os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
         self.timeline.set_filmstrip("")
-        self.lbl_vp_mode.setText("미리보기 없음")
+        self.lbl_vp_mode.setText(tr("vp.mode_none"))
         if self.level_info:
-            detail = f"BPM {self.level_info.bpm:g}, 타일 {self.level_info.tile_count:,}, 장식 {self.level_info.decoration_count:,}"
+            detail = tr(
+                "vp.level_detail",
+                bpm=self.level_info.bpm,
+                tiles=self.level_info.tile_count,
+                decos=self.level_info.decoration_count,
+                filts=len(self.level_info.filters),
+            )
             self.viewport.set_level_placeholder(self.level_info.display_title, detail)
             if self.level_info.song_path and os.path.isfile(self.level_info.song_path):
                 self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
@@ -1777,7 +1804,7 @@ class MainWindow(QMainWindow):
             self._refresh_summary_ui()
 
     def _browse_adofai_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Steam ADOFAI 폴더 선택", self.adofai_dir)
+        d = QFileDialog.getExistingDirectory(self, tr("dlg.steam_dir_title"), self.adofai_dir)
         if d:
             self.adofai_dir = d
             self._update_statusbar()
@@ -1786,7 +1813,7 @@ class MainWindow(QMainWindow):
         ext = self.export_state["format"]
         flt = "MP4 Video (*.mp4);;MKV Video (*.mkv)" if ext == "mp4" else "MKV Video (*.mkv);;MP4 Video (*.mp4)"
         start = self.output_path or self.export_state["output_dir"]
-        path, _ = QFileDialog.getSaveFileName(self, "출력 파일 경로 지정", start, flt)
+        path, _ = QFileDialog.getSaveFileName(self, tr("dlg.out_file_title"), start, flt)
         if path:
             self.output_path = path
             chosen_ext = os.path.splitext(path)[1].lower().lstrip(".")
@@ -1796,7 +1823,7 @@ class MainWindow(QMainWindow):
             self._refresh_summary_ui()
 
     def _browse_output_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "출력 폴더 지정", self.export_state["output_dir"])
+        d = QFileDialog.getExistingDirectory(self, tr("dlg.out_dir_title"), self.export_state["output_dir"])
         if d:
             self.export_state["output_dir"] = d
             self._sync_default_output_path()
@@ -1810,15 +1837,16 @@ class MainWindow(QMainWindow):
             os.startfile(target)
 
     def _show_hw_diagnostics(self) -> None:
-        gpus = "\n".join(f"  - {g.name} ({g.vram_mb} MB)" for g in self.caps.gpus) or "  (없음)"
-        msg = (
-            f"Steam ADOFAI: {self.adofai_dir or '(미감지)'}\n"
-            f"FFmpeg: {self.caps.ffmpeg_path}\n"
-            f"감지된 GPU:\n{gpus}\n"
-            f"검증된 인코더: {', '.join(self.caps.verified_encoders)}\n"
-            f"권장 백엔드: {self.caps.recommended_label}"
+        gpus = "\n".join(f"  - {g.name} ({g.vram_mb} MB)" for g in self.caps.gpus) or tr("dlg.diag_none")
+        msg = tr(
+            "dlg.diag_body",
+            adofai=self.adofai_dir or tr("dlg.diag_undetected"),
+            ffmpeg=self.caps.ffmpeg_path,
+            gpus=gpus,
+            encs=", ".join(self.caps.verified_encoders),
+            rec=self.caps.recommended_label,
         )
-        QMessageBox.information(self, "하드웨어 및 인코더 진단", msg)
+        QMessageBox.information(self, tr("dlg.diag_title"), msg)
 
     # ------------------------------------------------------------------ Updates (GitHub Releases)
     def _check_updates(self, manual: bool = False) -> None:
@@ -1829,17 +1857,17 @@ class MainWindow(QMainWindow):
         self._upd_checker.result.connect(self._on_update_checked)
         self._upd_checker.start()
         if manual:
-            self.statusBar().showMessage("업데이트를 확인하는 중...", 3000)
+            self.statusBar().showMessage(tr("sb.checking_upd"), 3000)
 
     def _on_update_checked(self, info, err: str) -> None:
         manual = getattr(self, "_upd_manual", False)
         if err:
             if manual:
-                QMessageBox.warning(self, "업데이트 확인 실패", f"업데이트 정보를 가져오지 못했습니다.\n{err}")
+                QMessageBox.warning(self, tr("upd.fail_title"), tr("upd.fail_msg", err=err))
             return
         if info is None:
             if manual:
-                QMessageBox.information(self, "업데이트", f"현재 최신 버전입니다 (v{__version__}).")
+                QMessageBox.information(self, tr("upd.title"), tr("upd.latest", ver=__version__))
             return
         if not manual and getattr(self, "_skip_update_version", "") == info.version:
             return
@@ -1847,14 +1875,14 @@ class MainWindow(QMainWindow):
         if len(notes) > 900:
             notes = notes[:900] + "…"
         box = QMessageBox(self)
-        box.setWindowTitle("업데이트 가능")
+        box.setWindowTitle(tr("upd.avail_title"))
         box.setIcon(QMessageBox.Information)
-        box.setText(f"새 버전 v{info.version} 이(가) 있습니다. (현재 v{__version__})")
-        box.setInformativeText(notes or "릴리스 노트가 없습니다.")
-        btn_up = box.addButton("지금 업데이트", QMessageBox.AcceptRole) if info.asset_url else None
-        btn_page = box.addButton("릴리스 페이지", QMessageBox.ActionRole)
-        btn_skip = box.addButton("이 버전 건너뛰기", QMessageBox.DestructiveRole)
-        box.addButton("나중에", QMessageBox.RejectRole)
+        box.setText(tr("upd.avail_text", new=info.version, cur=__version__))
+        box.setInformativeText(notes or tr("upd.no_notes"))
+        btn_up = box.addButton(tr("upd.btn_now"), QMessageBox.AcceptRole) if info.asset_url else None
+        btn_page = box.addButton(tr("upd.btn_page"), QMessageBox.ActionRole)
+        btn_skip = box.addButton(tr("upd.btn_skip"), QMessageBox.DestructiveRole)
+        box.addButton(tr("upd.btn_later"), QMessageBox.RejectRole)
         box.exec()
         clicked = box.clickedButton()
         if btn_up is not None and clicked is btn_up:
@@ -1865,8 +1893,8 @@ class MainWindow(QMainWindow):
             self._skip_update_version = info.version
 
     def _download_update(self, info) -> None:
-        dlg = QProgressDialog(f"v{info.version} 설치 파일을 내려받는 중...", "취소", 0, 100, self)
-        dlg.setWindowTitle("업데이트")
+        dlg = QProgressDialog(tr("upd.dl_msg", ver=info.version), tr("btn.cancel"), 0, 100, self)
+        dlg.setWindowTitle(tr("upd.title"))
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setAutoClose(False)
         dlg.setMinimumDuration(0)
@@ -1879,15 +1907,13 @@ class MainWindow(QMainWindow):
         def on_done(path: str, err: str) -> None:
             dlg.close()
             if err:
-                if "취소" not in err:
-                    QMessageBox.warning(self, "업데이트 실패", err)
+                if "취소" not in err and "cancel" not in err.lower():
+                    QMessageBox.warning(self, tr("upd.dl_fail"), err)
                 return
             if self._is_busy_for_update():
-                QMessageBox.information(self, "업데이트", f"렌더링 중에는 설치할 수 없습니다.\n끝난 뒤 직접 실행해 주세요:\n{path}")
+                QMessageBox.information(self, tr("upd.title"), tr("upd.busy_msg", path=path))
                 return
-            ans = QMessageBox.question(
-                self, "업데이트 설치", "설치 프로그램을 실행하면 앱이 종료되고 업데이트 후 다시 시작됩니다. 계속할까요?"
-            )
+            ans = QMessageBox.question(self, tr("upd.install_title"), tr("upd.install_confirm"))
             if ans == QMessageBox.Yes:
                 launch_installer(path)
                 QApplication.quit()
@@ -1905,7 +1931,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "ADOFAI PV Renderer",
-            f"ADOFAI PV Renderer v{__version__}\n\n결정론적 오프라인 렌더링 및 실제 인게임 셰이더·필터·타격음 합성 도구.",
+            tr("dlg.about_body", ver=__version__),
         )
 
     # ------------------------------------------------------------------ Pre-Render Confirm -> Render Card
@@ -1943,7 +1969,7 @@ class MainWindow(QMainWindow):
 
     def _open_render_confirm(self) -> None:
         if not self.level_path or not os.path.isfile(self.level_path):
-            QMessageBox.warning(self, "레벨 미선택", "먼저 렌더링할 .adofai 레벨을 열어주세요.")
+            QMessageBox.warning(self, tr("dlg.no_level_title"), tr("dlg.no_level_render_msg"))
             return
         if not self.output_path:
             self._sync_default_output_path()
@@ -1967,7 +1993,7 @@ class MainWindow(QMainWindow):
         est_sec, target_frames, _clip_dur = estimate_render_time_sec(settings, self.caps, self.level_duration)
         runner = RenderRunner(caps=self.caps)
         title = self.level_info.display_title if self.level_info else os.path.basename(self.level_path)
-        self.sb_state.setText("렌더링 중")
+        self.sb_state.setText(tr("sb.rendering"))
         card = RenderCardDialog(
             runner=runner,
             settings=settings,
@@ -1978,11 +2004,11 @@ class MainWindow(QMainWindow):
         )
         card.render_finished.connect(self._on_render_finished)
         card.exec()
-        self.sb_state.setText("준비")
+        self.sb_state.setText(tr("sb.ready"))
 
     def _on_render_finished(self, res: RenderResult) -> None:
         if res.success:
-            self.statusBar().showMessage(f"렌더링 완료: {res.output_path}", 8000)
+            self.statusBar().showMessage(tr("sb.render_done", path=res.output_path), 8000)
 
     # ------------------------------------------------------------------ UI Sync
     def _sync_default_output_path(self) -> None:
@@ -2008,12 +2034,15 @@ class MainWindow(QMainWindow):
                 fm = QFontMetrics(self.lbl_lvl_name.font())
                 self.lbl_lvl_name.setText(fm.elidedText(self.level_info.display_title, Qt.ElideRight, 246))
                 self.lbl_lvl_name.setToolTip(self.level_info.display_title)
-                bgm = self.level_info.song_filename or "BGM 없음"
-                sub = f"오디오: {bgm}"
+                bgm = self.level_info.song_filename or tr("insp.no_bgm")
+                sub = tr("insp.audio_label", bgm=bgm)
                 fm_sub = QFontMetrics(self.lbl_lvl_sub.font())
                 self.lbl_lvl_sub.setText(fm_sub.elidedText(sub, Qt.ElideRight, 246))
                 self.lbl_lvl_sub.setToolTip(sub)
                 self.lbl_insp_bpm.setText("")
+            else:
+                self.lbl_lvl_name.setText(tr("insp.no_level"))
+                self.lbl_lvl_sub.setText(tr("insp.no_level_sub"))
 
             cur_wh = (self.export_state["width"], self.export_state["height"])
             for i in range(self.cmb_res.count()):
@@ -2054,7 +2083,7 @@ class MainWindow(QMainWindow):
         sec = self.timeline.playhead
         self.lbl_tc.setText(format_timecode_ms(sec))
         frame = int(round(sec * self.export_state["fps"]))
-        self.lbl_frame_num.setText(f"{frame:,} 프레임")
+        self.lbl_frame_num.setText(tr("tl.frame_num", n=frame))
 
     def _refresh_trim_summary(self) -> None:
         fps = self.export_state["fps"]
@@ -2068,13 +2097,13 @@ class MainWindow(QMainWindow):
                 self.spn_in.setValue(s)
                 self.spn_out.setValue(e)
                 self.btn_reset_trim.show()
-                self.lbl_tl_range.setText(f"구간 트림 {format_timecode(s)} – {format_timecode(e)}")
+                self.lbl_tl_range.setText(tr("tl.range_trim", s=format_timecode(s), e=format_timecode(e)))
             else:
                 span = self.level_duration
                 self.spn_in.setValue(0.0)
                 self.spn_out.setValue(self.level_duration)
                 self.btn_reset_trim.hide()
-                self.lbl_tl_range.setText(f"전체 구간 (00:00.0 – {format_timecode(span)})")
+                self.lbl_tl_range.setText(tr("tl.range_full", span=format_timecode(span)))
         finally:
             self._syncing_controls = False
 
@@ -2086,19 +2115,148 @@ class MainWindow(QMainWindow):
         est_mb = estimate_output_size_mb(settings, self.level_info, clip_dur)
 
         self.val_est_dur.setText(f"{format_timecode(clip_dur)} ({target_frames:,}f)")
-        self.val_est_size.setText(f"약 {est_mb:.0f} MB" if est_mb < 1024 else f"약 {est_mb / 1024.0:.2f} GB")
+        self.val_est_size.setText(tr("insp.size_mb", v=est_mb) if est_mb < 1024 else tr("insp.size_gb", v=est_mb / 1024.0))
         self.val_est_time.setText(format_duration_korean(est_sec))
 
     def _update_statusbar(self) -> None:
         _enc, enc_label = resolve_video_encoder(self.caps, self.export_state["gpu_mode"], self.export_state["codec"])
         self.sb_enc.setText(f" {enc_label}")
-        eng_str = "  Steam ADOFAI 연결됨  " if self.adofai_dir else "  ADOFAI 경로 미지정  "
+        eng_str = tr("sb.steam_ok") if self.adofai_dir else tr("sb.steam_none")
         if self.export_state.get("experimental_optimize_render"):
-            eng_str = "  최적화 렌더(실험) 활성  "
+            eng_str = tr("sb.opt_on")
         self.sb_engine.setText(eng_str)
         if self.level_info:
             self.sb_chart.setText(
-                f"  타일 {self.level_info.tile_count:,}  장식 {self.level_info.decoration_count:,}  필터 {len(self.level_info.filters)}  "
+                tr(
+                    "sb.chart_info",
+                    tiles=self.level_info.tile_count,
+                    decos=self.level_info.decoration_count,
+                    filts=len(self.level_info.filters),
+                )
             )
         else:
-            self.sb_chart.setText("  레벨 없음  ")
+            self.sb_chart.setText(tr("sb.no_level"))
+
+    # ------------------------------------------------------------------ Live Language Switching
+    def _switch_language(self, lang_code: str) -> None:
+        chosen = set_language(lang_code, persist=True)
+        for code, act in self._lang_actions.items():
+            act.blockSignals(True)
+            act.setChecked(code == chosen)
+            act.blockSignals(False)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        # Menus & actions
+        self.m_file.setTitle(tr("menu.file"))
+        self.act_open.setText(tr("menu.open_level"))
+        self.m_samples.setTitle(tr("menu.samples"))
+        if self.act_samples_empty is not None:
+            self.act_samples_empty.setText(tr("menu.samples_empty"))
+        self.act_steam.setText(tr("menu.steam_dir"))
+        self.act_quit.setText(tr("menu.quit"))
+
+        self.m_edit.setTitle(tr("menu.edit"))
+        self.act_in.setText(tr("menu.mark_in"))
+        self.act_out.setText(tr("menu.mark_out"))
+        self.act_reset_trim.setText(tr("menu.reset_trim"))
+        self.act_planet.setText(tr("menu.planet_cfg"))
+        self.act_planet_def.setText(tr("menu.planet_reset"))
+        self.act_exp_cfg.setText(tr("menu.export_cfg"))
+        self.m_lang.setTitle(tr("menu.language"))
+
+        self.m_seq.setTitle(tr("menu.seq"))
+        self.act_prev.setText(tr("menu.prev_build"))
+        self.act_prev_force.setText(tr("menu.prev_rebuild"))
+        self.act_seq_cfg.setText(tr("menu.open_seq_tab"))
+        self.act_clear_cache.setText(tr("menu.clear_cache"))
+
+        self.m_view.setTitle(tr("menu.view"))
+        self.act_toggle_inspector.setText(tr("menu.toggle_inspector"))
+        self.act_zi.setText(tr("menu.zoom_in"))
+        self.act_zo.setText(tr("menu.zoom_out"))
+        self.act_zf.setText(tr("menu.zoom_fit"))
+
+        self.m_exp.setTitle(tr("menu.render"))
+        self.act_render.setText(tr("menu.render_start"))
+        self.act_opt_render.setText(tr("menu.opt_render"))
+        self.act_out_file.setText(tr("menu.out_file"))
+        self.act_out_dir.setText(tr("menu.out_dir"))
+        self.act_open_out.setText(tr("menu.open_out_dir"))
+
+        self.m_help.setTitle(tr("menu.help"))
+        self.act_diag.setText(tr("menu.diag"))
+        self.act_upd.setText(tr("menu.check_upd"))
+        self.act_about.setText(tr("menu.about"))
+
+        # Viewer & Inspector headers / tabs / labels
+        if self.level_path:
+            self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
+            self.lbl_vp_mode.setText(tr("vp.mode_fit") if self.viewport.has_video() else tr("vp.mode_none"))
+            if not self.viewport.has_video() and self.level_info:
+                detail = tr(
+                    "vp.level_detail",
+                    bpm=self.level_info.bpm,
+                    tiles=self.level_info.tile_count,
+                    decos=self.level_info.decoration_count,
+                    filts=len(self.level_info.filters),
+                )
+                self.viewport.set_level_placeholder(self.level_info.display_title, detail)
+        else:
+            self.lbl_vp_title.setText(tr("vp.header"))
+            self.lbl_vp_mode.setText(tr("vp.mode_fit"))
+        self.viewport.retranslate_ui()
+
+        self.lbl_insp_hdr.setText(tr("insp.header"))
+        self.insp_tabs.setTabText(0, tr("insp.tab_out"))
+        self.insp_tabs.setTabText(1, tr("insp.tab_seq"))
+        self.lbl_k_res.setText(tr("insp.res"))
+        self.lbl_k_fps.setText(tr("insp.fps"))
+        self.spn_fps.setToolTip(tr("insp.fps_tip"))
+        self.lbl_k_fmt.setText(tr("insp.fmt"))
+        self.lbl_k_codec.setText(tr("insp.codec"))
+        self.lbl_k_audio.setText(tr("insp.audio"))
+        self.chk_bgm.setText(tr("insp.bgm"))
+        self.chk_hit.setText(tr("insp.hitsound"))
+        self.lbl_rng.setText(tr("insp.range"))
+        self.btn_reset_trim.setText(tr("insp.reset_full"))
+        self.lbl_k_start.setText(tr("insp.start"))
+        self.lbl_k_end.setText(tr("insp.end"))
+        self.lbl_k_fname.setText(tr("insp.filename"))
+        self.lbl_k_dir.setText(tr("insp.folder"))
+        self.btn_browse_dir.setToolTip(tr("insp.folder_tip"))
+        self.lbl_est_dur.setText(tr("insp.est_dur"))
+        self.lbl_est_size.setText(tr("insp.est_size"))
+        self.lbl_est_time.setText(tr("insp.est_time"))
+
+        self.lbl_pl_hdr.setText(tr("insp.planet_hdr"))
+        self.btn_red_picker.set_label(tr("insp.fire"))
+        self.btn_red_picker.setToolTip(tr("insp.fire_tip"))
+        self.btn_blue_picker.set_label(tr("insp.ice"))
+        self.btn_blue_picker.setToolTip(tr("insp.ice_tip"))
+        self.btn_pl_rst.setText(tr("insp.planet_reset_btn"))
+        self.lbl_seq_hdr.setText(tr("insp.seq_hdr"))
+        self.lbl_k_pad.setText(tr("insp.end_pad"))
+        self.spn_end_pad.setSuffix(tr("insp.sec_suffix"))
+        self.chk_hide_cd_quick.setText(tr("insp.hide_cd"))
+        self.btn_adv.setText(tr("insp.btn_adv"))
+        self.btn_adv.setToolTip(tr("insp.btn_adv_tip"))
+        self.btn_render.setText(tr("insp.btn_render"))
+
+        # Timeline & transport
+        self.lbl_tl_hdr.setText(tr("tl.header"))
+        self.btn_to_start.setToolTip(tr("tl.tip_start"))
+        self.btn_step_back.setToolTip(tr("tl.tip_step_back"))
+        self.btn_play.setToolTip(tr("tl.tip_play"))
+        self.btn_step_fwd.setToolTip(tr("tl.tip_step_fwd"))
+        self.btn_to_end.setToolTip(tr("tl.tip_end"))
+        self.btn_mark_in.setToolTip(tr("tl.tip_mark_in"))
+        self.btn_mark_out.setToolTip(tr("tl.tip_mark_out"))
+        self.btn_mute.setToolTip(tr("tl.tip_mute"))
+        self.sld_vol.setToolTip(tr("tl.tip_vol"))
+        self.sld_zoom.setToolTip(tr("tl.tip_zoom"))
+        self.btn_fit.setText(tr("tl.btn_fit"))
+        self.sb_state.setText(tr("sb.ready"))
+
+        self._refresh_summary_ui()
+        self.timeline.update()

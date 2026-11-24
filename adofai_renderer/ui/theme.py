@@ -55,12 +55,12 @@ def build_studio_qss() -> str:
 QMainWindow, QDialog {{
     background-color: {BG_WINDOW};
     color: {TEXT_PRIMARY};
-    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    font-family: "Segoe UI", "Malgun Gothic", "Yu Gothic UI", "Meiryo", sans-serif;
     font-size: 12px;
 }}
 QWidget {{
     color: {TEXT_PRIMARY};
-    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    font-family: "Segoe UI", "Malgun Gothic", "Yu Gothic UI", "Meiryo", sans-serif;
     font-size: 12px;
 }}
 QMenuBar {{
@@ -559,13 +559,6 @@ def format_timecode_ms(sec: float) -> str:
 
 
 def format_duration_korean(sec: float) -> str:
-    sec = max(0.0, float(sec or 0.0))
-    if sec < 60:
-        return f"약 {int(round(sec))}초"
-    mins = int(sec // 60)
-    rem = int(round(sec % 60))
-    if mins < 60:
-        return f"약 {mins}분 {rem:02d}초"
-    hrs = mins // 60
-    mins = mins % 60
-    return f"약 {hrs}시간 {mins:02d}분"
+    from ..i18n import format_duration
+
+    return format_duration(sec)

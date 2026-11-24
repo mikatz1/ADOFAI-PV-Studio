@@ -679,7 +679,7 @@ namespace AdofaiRenderAgent
 
         private static bool Persistence_HitSoundVolume_Prefix(ref int __result)
         {
-            __result = 100;
+            __result = 10; // ADOFAI Persistence.hitSoundVolume is 0..10 (10 = 100%)
             return false;
         }
 

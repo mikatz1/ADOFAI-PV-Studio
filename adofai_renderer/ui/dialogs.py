@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..gpu_detect import HardwareCapabilities, resolve_video_encoder
+from ..i18n import tr
 from ..level_info import AdofaiLevelInfo
 from ..render_runner import RenderSettings, estimate_render_time_sec
 from .theme import (
@@ -171,7 +172,7 @@ class PlanetSettingsDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("행성(공) 색상 및 불투명도 설정")
+        self.setWindowTitle(tr("planet.title"))
         self.setFixedWidth(450)
 
         self.red_color = red_color.upper()
@@ -195,7 +196,7 @@ class PlanetSettingsDialog(QDialog):
         grid.setSpacing(10)
 
         # Red planet (1)
-        grid.addWidget(QLabel("불 행성 (1번 공)"), 0, 0)
+        grid.addWidget(QLabel(tr("planet.fire")), 0, 0)
         self.btn_red_swatch = QPushButton()
         self.btn_red_swatch.setFixedSize(36, 26)
         self.btn_red_swatch.clicked.connect(lambda: self._pick_color("red"))
@@ -213,7 +214,7 @@ class PlanetSettingsDialog(QDialog):
         self.spn_red_a.setSuffix("%")
         self.sld_red_a.valueChanged.connect(self.spn_red_a.setValue)
         self.spn_red_a.valueChanged.connect(self._on_red_opacity)
-        grid.addWidget(QLabel("불투명도"), 1, 0)
+        grid.addWidget(QLabel(tr("planet.opacity")), 1, 0)
         grid.addWidget(self.sld_red_a, 1, 1, 1, 2)
         grid.addWidget(self.spn_red_a, 1, 3)
 
@@ -223,7 +224,7 @@ class PlanetSettingsDialog(QDialog):
         grid.addWidget(sep, 2, 0, 1, 4)
 
         # Blue planet (2)
-        grid.addWidget(QLabel("얼음 행성 (2번 공)"), 3, 0)
+        grid.addWidget(QLabel(tr("planet.ice")), 3, 0)
         self.btn_blue_swatch = QPushButton()
         self.btn_blue_swatch.setFixedSize(36, 26)
         self.btn_blue_swatch.clicked.connect(lambda: self._pick_color("blue"))
@@ -241,23 +242,23 @@ class PlanetSettingsDialog(QDialog):
         self.spn_blue_a.setSuffix("%")
         self.sld_blue_a.valueChanged.connect(self.spn_blue_a.setValue)
         self.spn_blue_a.valueChanged.connect(self._on_blue_opacity)
-        grid.addWidget(QLabel("불투명도"), 4, 0)
+        grid.addWidget(QLabel(tr("planet.opacity")), 4, 0)
         grid.addWidget(self.sld_blue_a, 4, 1, 1, 2)
         grid.addWidget(self.spn_blue_a, 4, 3)
 
         root.addLayout(grid)
 
-        note = QLabel("기본값: 불투명도 100% 순수 빨강(#FF0000) · 순수 파랑(#0000FF). 3구체 레벨은 두 색상 사이로 자동 보간됩니다.")
+        note = QLabel(tr("planet.note"))
         note.setWordWrap(True)
         note.setObjectName("muted")
         root.addWidget(note)
 
         btn_row = QHBoxLayout()
-        btn_reset = QPushButton("기본값 복원")
+        btn_reset = QPushButton(tr("btn.restore_defaults"))
         btn_reset.clicked.connect(self._reset_defaults)
-        btn_cancel = QPushButton("취소")
+        btn_cancel = QPushButton(tr("btn.cancel"))
         btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("적용")
+        btn_ok = QPushButton(tr("btn.apply"))
         btn_ok.setObjectName("primaryBtn")
         btn_ok.clicked.connect(self.accept)
         btn_row.addWidget(btn_reset)
@@ -291,7 +292,7 @@ class PlanetSettingsDialog(QDialog):
 
     def _pick_color(self, which: str) -> None:
         cur = QColor(self.red_color if which == "red" else self.blue_color)
-        col = QColorDialog.getColor(cur, self, "행성 색상 선택")
+        col = QColorDialog.getColor(cur, self, tr("planet.pick_color"))
         if col.isValid():
             hx = col.name().upper()
             if which == "red":
@@ -349,7 +350,7 @@ class SequenceSettingsDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("시퀀스 및 구간 설정")
+        self.setWindowTitle(tr("seq.title"))
         self.setFixedWidth(410)
         self._duration = max(1.0, duration_sec)
 
@@ -360,7 +361,7 @@ class SequenceSettingsDialog(QDialog):
         g = QGridLayout()
         g.setSpacing(8)
 
-        g.addWidget(QLabel("시작 시점 (초):"), 0, 0)
+        g.addWidget(QLabel(tr("seq.start")), 0, 0)
         self.spn_start = QDoubleSpinBox()
         self.spn_start.setRange(0.0, 36000.0)
         self.spn_start.setDecimals(1)
@@ -368,7 +369,7 @@ class SequenceSettingsDialog(QDialog):
         self.spn_start.setSuffix(" s")
         g.addWidget(self.spn_start, 0, 1)
 
-        g.addWidget(QLabel("종료 시점 (0 = 끝까지):"), 1, 0)
+        g.addWidget(QLabel(tr("seq.end")), 1, 0)
         self.spn_end = QDoubleSpinBox()
         self.spn_end.setRange(0.0, 36000.0)
         self.spn_end.setDecimals(1)
@@ -376,7 +377,7 @@ class SequenceSettingsDialog(QDialog):
         self.spn_end.setSuffix(" s")
         g.addWidget(self.spn_end, 1, 1)
 
-        g.addWidget(QLabel("클리어 후 여백:"), 2, 0)
+        g.addWidget(QLabel(tr("seq.pad")), 2, 0)
         self.spn_pad = QDoubleSpinBox()
         self.spn_pad.setRange(0.0, 30.0)
         self.spn_pad.setDecimals(1)
@@ -384,18 +385,18 @@ class SequenceSettingsDialog(QDialog):
         self.spn_pad.setSuffix(" s")
         g.addWidget(self.spn_pad, 2, 1)
 
-        self.chk_hide_cd = QCheckBox("시작 카운트다운(3-2-1) 숨김 (제목·판정·Auto 아이콘은 항상 숨김)")
+        self.chk_hide_cd = QCheckBox(tr("seq.hide_cd"))
         self.chk_hide_cd.setChecked(hide_countdown)
         g.addWidget(self.chk_hide_cd, 3, 0, 1, 2)
 
         root.addLayout(g)
 
         btn_row = QHBoxLayout()
-        btn_full = QPushButton("전체 구간으로 초기화")
+        btn_full = QPushButton(tr("seq.reset_full"))
         btn_full.clicked.connect(self._reset_full)
-        btn_cancel = QPushButton("취소")
+        btn_cancel = QPushButton(tr("btn.cancel"))
         btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("적용")
+        btn_ok = QPushButton(tr("btn.apply"))
         btn_ok.setObjectName("primaryBtn")
         btn_ok.clicked.connect(self.accept)
         btn_row.addWidget(btn_full)
@@ -420,7 +421,7 @@ class ExportSettingsDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("세부 설정 (하드웨어 · 화질 · 오디오)")
+        self.setWindowTitle(tr("exp.title"))
         self.setFixedWidth(520)
         self.state = dict(state)
         self.caps = caps
@@ -441,17 +442,17 @@ class ExportSettingsDialog(QDialog):
         gh.setContentsMargins(14, 14, 14, 14)
         gh.setSpacing(9)
 
-        gh.addWidget(QLabel("GPU 가속 백엔드:"), 0, 0)
+        gh.addWidget(QLabel(tr("exp.gpu_backend")), 0, 0)
         self.cmb_gpu = QComboBox()
-        self.cmb_gpu.addItem("자동 (NVIDIA CUDA 우선 → 내장 GPU → CPU)", "auto")
-        self.cmb_gpu.addItem("NVIDIA CUDA / NVENC", "nvenc")
-        self.cmb_gpu.addItem("내장 그래픽 (Intel QSV / AMD AMF)", "igpu")
-        self.cmb_gpu.addItem("CPU 소프트웨어 (libx264 / libx265)", "cpu")
+        self.cmb_gpu.addItem(tr("exp.gpu_auto"), "auto")
+        self.cmb_gpu.addItem(tr("exp.gpu_nvenc"), "nvenc")
+        self.cmb_gpu.addItem(tr("exp.gpu_igpu"), "igpu")
+        self.cmb_gpu.addItem(tr("exp.gpu_cpu"), "cpu")
         g_idx = {"auto": 0, "nvenc": 1, "igpu": 2, "cpu": 3}.get(self.state["gpu_mode"], 0)
         self.cmb_gpu.setCurrentIndex(g_idx)
         gh.addWidget(self.cmb_gpu, 0, 1, 1, 2)
 
-        gh.addWidget(QLabel("최대 GPU 사용 상한:"), 1, 0)
+        gh.addWidget(QLabel(tr("exp.gpu_cap")), 1, 0)
         self.sld_gpu_cap = QSlider(Qt.Horizontal)
         self.sld_gpu_cap.setRange(10, 100)
         self.sld_gpu_cap.setValue(self.state["gpu_limit_percent"])
@@ -464,7 +465,7 @@ class ExportSettingsDialog(QDialog):
         gh.addWidget(self.sld_gpu_cap, 1, 1)
         gh.addWidget(self.spn_gpu_cap, 1, 2)
 
-        gh.addWidget(QLabel("최대 RAM 사용 상한:"), 2, 0)
+        gh.addWidget(QLabel(tr("exp.ram_cap")), 2, 0)
         self.sld_ram_cap = QSlider(Qt.Horizontal)
         self.sld_ram_cap.setRange(30, 95)
         self.sld_ram_cap.setValue(self.state["ram_limit_percent"])
@@ -478,12 +479,12 @@ class ExportSettingsDialog(QDialog):
         gh.addWidget(self.spn_ram_cap, 2, 2)
 
         cpu_count = os.cpu_count() or 8
-        gh.addWidget(QLabel("최대 점유 CPU 코어:"), 3, 0)
+        gh.addWidget(QLabel(tr("exp.cpu_cores")), 3, 0)
         self.cmb_cpu_cores = QComboBox()
-        self.cmb_cpu_cores.addItem(f"자동 (전체 {cpu_count} 스레드 활용)", 0)
+        self.cmb_cpu_cores.addItem(tr("exp.cpu_auto", n=cpu_count), 0)
         for c in sorted({1, 2, 4, 6, 8, 12, 16, cpu_count}):
             if c <= cpu_count:
-                self.cmb_cpu_cores.addItem(f"최대 {c} 코어", c)
+                self.cmb_cpu_cores.addItem(tr("exp.cpu_n", c=c), c)
         cur_cores = int(self.state.get("max_cpu_cores", 0))
         for idx in range(self.cmb_cpu_cores.count()):
             if self.cmb_cpu_cores.itemData(idx) == cur_cores:
@@ -491,29 +492,25 @@ class ExportSettingsDialog(QDialog):
                 break
         gh.addWidget(self.cmb_cpu_cores, 3, 1, 1, 2)
 
-        gh.addWidget(QLabel("저사양 안전 우회:"), 4, 0)
+        gh.addWidget(QLabel(tr("exp.lowspec")), 4, 0)
         self.cmb_lowspec = QComboBox()
-        self.cmb_lowspec.addItem("자동 감지 (권장 · 오류 시 동기 캡처/CPU 자동 우회)", "auto")
-        self.cmb_lowspec.addItem("강제 활성화 (저VRAM 단일 슬롯 + 동기 ReadPixels)", "force")
-        self.cmb_lowspec.addItem("표준 고속 모드 (실패 시에만 안전 우회)", "off")
+        self.cmb_lowspec.addItem(tr("exp.lowspec_auto"), "auto")
+        self.cmb_lowspec.addItem(tr("exp.lowspec_force"), "force")
+        self.cmb_lowspec.addItem(tr("exp.lowspec_off"), "off")
         ls_idx = {"auto": 0, "force": 1, "off": 2}.get(self.state.get("low_spec_mode", "auto"), 0)
         self.cmb_lowspec.setCurrentIndex(ls_idx)
         gh.addWidget(self.cmb_lowspec, 4, 1, 1, 2)
 
-        self.chk_opt_render = QCheckBox("최적화 렌더 (실험): 불투명도 0%·화면 밖 장식 제외 및 고해상도 장식 LOD 프록시 교체")
+        self.chk_opt_render = QCheckBox(tr("exp.opt_chk"))
         self.chk_opt_render.setChecked(bool(self.state.get("experimental_optimize_render", False)))
         gh.addWidget(self.chk_opt_render, 5, 0, 1, 3)
 
-        hw_note = QLabel(
-            "기본값: GPU 90% · RAM 80% · CPU 자동. 최적화 렌더(실험)는 512px 이상 고해상도 장식의 "
-            "멀티 해상도 프록시를 사전 생성해 화면 픽셀 크기가 작을 때만 자동 교체하며(1.35× 나이퀴스트 마진), "
-            "최종 결과물 화질은 유지하면서 병목을 줄입니다."
-        )
+        hw_note = QLabel(tr("exp.hw_note"))
         hw_note.setWordWrap(True)
         hw_note.setObjectName("muted")
         gh.addWidget(hw_note, 6, 0, 1, 3)
 
-        tabs.addTab(t_hw, "하드웨어 · 리소스")
+        tabs.addTab(t_hw, tr("exp.tab_hw"))
 
         # Tab 2: Encoding Quality & Audio Mixing (non-overlapping with main Output panel)
         t_qa = QWidget()
@@ -521,16 +518,16 @@ class ExportSettingsDialog(QDialog):
         gq.setContentsMargins(14, 14, 14, 14)
         gq.setSpacing(10)
 
-        gq.addWidget(QLabel("인코딩 화질:"), 0, 0)
+        gq.addWidget(QLabel(tr("exp.qual_label")), 0, 0)
         self.cmb_qual = QComboBox()
-        self.cmb_qual.addItem("최고 화질 (CQ 15 · PV 마스터)", "ultra")
-        self.cmb_qual.addItem("고화질 (CQ 19 · 권장)", "high")
-        self.cmb_qual.addItem("표준 용량 (CQ 23)", "balanced")
+        self.cmb_qual.addItem(tr("exp.qual_ultra"), "ultra")
+        self.cmb_qual.addItem(tr("exp.qual_high"), "high")
+        self.cmb_qual.addItem(tr("exp.qual_bal"), "balanced")
         q_idx = {"ultra": 0, "high": 1, "balanced": 2}.get(self.state["quality"], 1)
         self.cmb_qual.setCurrentIndex(q_idx)
         gq.addWidget(self.cmb_qual, 0, 1, 1, 2)
 
-        gq.addWidget(QLabel("배경음악 (BGM) 볼륨:"), 1, 0)
+        gq.addWidget(QLabel(tr("exp.bgm_vol")), 1, 0)
         self.sld_bgm = QSlider(Qt.Horizontal)
         self.sld_bgm.setRange(0, 200)
         self.sld_bgm.setValue(int(round(self.state["bgm_volume"] * 100)))
@@ -543,7 +540,7 @@ class ExportSettingsDialog(QDialog):
         gq.addWidget(self.sld_bgm, 1, 1)
         gq.addWidget(self.spn_bgm, 1, 2)
 
-        gq.addWidget(QLabel("인게임 타격음 볼륨:"), 2, 0)
+        gq.addWidget(QLabel(tr("exp.hit_vol")), 2, 0)
         self.sld_hit = QSlider(Qt.Horizontal)
         self.sld_hit.setRange(0, 200)
         self.sld_hit.setValue(int(round(self.state["hitsound_volume"] * 100)))
@@ -556,7 +553,7 @@ class ExportSettingsDialog(QDialog):
         gq.addWidget(self.sld_hit, 2, 1)
         gq.addWidget(self.spn_hit, 2, 2)
 
-        gq.addWidget(QLabel("오디오 비트레이트:"), 3, 0)
+        gq.addWidget(QLabel(tr("exp.abit")), 3, 0)
         self.cmb_abit = QComboBox()
         for br in ("320k", "256k", "192k"):
             self.cmb_abit.addItem(f"AAC {br}", br)
@@ -565,16 +562,16 @@ class ExportSettingsDialog(QDialog):
         gq.addWidget(self.cmb_abit, 3, 1, 1, 2)
 
         gq.setRowStretch(4, 1)
-        tabs.addTab(t_qa, "화질 · 오디오 믹싱")
+        tabs.addTab(t_qa, tr("exp.tab_qa"))
 
         root.addWidget(tabs)
 
         btn_row = QHBoxLayout()
-        btn_def = QPushButton("기본값 복원")
+        btn_def = QPushButton(tr("btn.restore_defaults"))
         btn_def.clicked.connect(self._restore_defaults)
-        btn_cancel = QPushButton("취소")
+        btn_cancel = QPushButton(tr("btn.cancel"))
         btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("저장")
+        btn_ok = QPushButton(tr("btn.save"))
         btn_ok.setObjectName("primaryBtn")
         btn_ok.clicked.connect(self.accept)
         btn_row.addWidget(btn_def)
@@ -624,19 +621,19 @@ class RenderConfirmDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("최종 렌더링 설정 확인")
+        self.setWindowTitle(tr("conf.title"))
         self.setFixedWidth(510)
         self.open_settings_requested = False
 
         est_sec, target_frames, clip_dur = estimate_render_time_sec(settings, caps, level_duration_sec)
         eta_dt = datetime.datetime.now() + datetime.timedelta(seconds=est_sec)
-        enc_name, enc_label = resolve_video_encoder(caps, settings.gpu_mode, settings.codec) if caps else ("auto", "자동")
+        enc_name, enc_label = resolve_video_encoder(caps, settings.gpu_mode, settings.codec) if caps else ("auto", "Auto")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 14)
         root.setSpacing(12)
 
-        hdr = QLabel("렌더링을 시작하기 전에 최종 설정을 확인하세요")
+        hdr = QLabel(tr("conf.hdr"))
         f = QFont()
         f.setPointSize(11)
         f.setBold(True)
@@ -653,7 +650,7 @@ class RenderConfirmDialog(QDialog):
         eta_lay.setContentsMargins(12, 10, 12, 10)
         eta_left = QVBoxLayout()
         eta_left.setSpacing(2)
-        lbl_eta_k = QLabel("예상 소요 시간")
+        lbl_eta_k = QLabel(tr("conf.est_time"))
         lbl_eta_k.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; border: none;")
         lbl_eta_v = QLabel(format_duration_korean(est_sec))
         lbl_eta_v.setStyleSheet("color: #f0f0f0; font-size: 15px; font-weight: 600; border: none;")
@@ -663,7 +660,7 @@ class RenderConfirmDialog(QDialog):
         eta_right = QVBoxLayout()
         eta_right.setSpacing(2)
         eta_right.setAlignment(Qt.AlignRight)
-        lbl_clk_k = QLabel("예상 완료 시각")
+        lbl_clk_k = QLabel(tr("conf.est_clk"))
         lbl_clk_k.setAlignment(Qt.AlignRight)
         lbl_clk_k.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; border: none;")
         lbl_clk_v = QLabel(eta_dt.strftime("%H:%M:%S"))
@@ -690,38 +687,46 @@ class RenderConfirmDialog(QDialog):
         title = level_info.display_title if level_info else os.path.basename(settings.level_path)
         is_trim = (settings.start_sec > 0.05 or settings.end_sec > 0.05)
         if is_trim:
-            end_str = format_timecode(settings.end_sec) if settings.end_sec > 0.05 else "끝"
-            range_str = f"구간 트림 ({format_timecode(settings.start_sec)} – {end_str} · {clip_dur:.1f}초 · {target_frames:,}프레임)"
+            end_str = format_timecode(settings.end_sec) if settings.end_sec > 0.05 else tr("conf.end_word")
+            range_str = tr("conf.range_trim", s=format_timecode(settings.start_sec), e=end_str, dur=clip_dur, frames=target_frames)
         else:
-            range_str = f"전체 렌더링 ({clip_dur:.1f}초 · {target_frames:,}프레임)"
+            range_str = tr("conf.range_full", dur=clip_dur, frames=target_frames)
 
         ext = os.path.splitext(settings.output_path)[1].lstrip(".").upper() or "MP4"
-        q_label = {"ultra": "최고 화질", "high": "고화질", "balanced": "표준"}.get(settings.quality, settings.quality)
+        q_label = {
+            "ultra": tr("conf.q_ultra"),
+            "high": tr("conf.q_high"),
+            "balanced": tr("conf.q_bal"),
+        }.get(settings.quality, settings.quality)
         vid_str = f"{settings.width} × {settings.height}  ·  {settings.fps} fps CFR  ·  {ext} ({settings.codec.upper()})  ·  {q_label}"
 
-        bgm_s = f"BGM {int(round(settings.bgm_volume*100))}%" if settings.include_bgm else "BGM 끔"
-        hit_s = f"타격음 {int(round(settings.hitsound_volume*100))}%" if settings.include_hitsounds else "타격음 끔"
+        bgm_s = tr("conf.bgm_on", v=int(round(settings.bgm_volume * 100))) if settings.include_bgm else tr("conf.bgm_off")
+        hit_s = tr("conf.hit_on", v=int(round(settings.hitsound_volume * 100))) if settings.include_hitsounds else tr("conf.hit_off")
         aud_str = f"{bgm_s}  ·  {hit_s}  ·  AAC {settings.audio_bitrate}"
 
-        cpu_s = f"CPU {settings.max_cpu_cores}코어" if settings.max_cpu_cores > 0 else "CPU 자동"
-        ls_s = {"auto": "안전 폴백 자동", "force": "저사양 안전 강제", "off": "표준 고속"}.get(settings.low_spec_mode, "자동")
-        opt_s = " · 최적화 렌더(실험) ON" if settings.experimental_optimize_render else ""
+        cpu_s = tr("conf.cpu_n", n=settings.max_cpu_cores) if settings.max_cpu_cores > 0 else tr("conf.cpu_auto")
+        ls_s = {
+            "auto": tr("conf.ls_auto"),
+            "force": tr("conf.ls_force"),
+            "off": tr("conf.ls_off"),
+        }.get(settings.low_spec_mode, tr("conf.ls_auto"))
+        opt_s = tr("conf.opt_tag") if settings.experimental_optimize_render else ""
         hw_str = f"{enc_label}  ·  GPU {settings.gpu_limit_percent}% · RAM {settings.ram_limit_percent}% · {cpu_s} ({ls_s}{opt_s})"
 
         rows = [
-            ("레벨", title),
-            ("렌더 구간", range_str),
-            ("비디오 스펙", vid_str),
-            ("오디오", aud_str),
-            ("하드웨어", hw_str),
-            ("출력 파일", settings.output_path),
+            (tr("conf.row_level"), title, False),
+            (tr("conf.row_range"), range_str, False),
+            (tr("conf.row_video"), vid_str, False),
+            (tr("conf.row_audio"), aud_str, False),
+            (tr("conf.row_hw"), hw_str, False),
+            (tr("conf.row_out"), settings.output_path, True),
         ]
-        for r, (k, v) in enumerate(rows):
+        for r, (k, v, is_path) in enumerate(rows):
             lk = QLabel(k)
             lk.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
             lk.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             lv = QLabel(v)
-            if k == "출력 파일":
+            if is_path:
                 fm = QFontMetrics(lv.font())
                 lv.setText(fm.elidedText(v, Qt.ElideMiddle, 360))
                 lv.setToolTip(v)
@@ -734,13 +739,13 @@ class RenderConfirmDialog(QDialog):
 
         # Planet color row with real color swatches
         row_p = len(rows)
-        lk_p = QLabel("행성 색상")
+        lk_p = QLabel(tr("conf.row_planets"))
         lk_p.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         p_box = QHBoxLayout()
         p_box.setSpacing(8)
         for col_hex, op, name in (
-            (settings.red_planet_color, settings.red_planet_opacity, "불"),
-            (settings.blue_planet_color, settings.blue_planet_opacity, "얼음"),
+            (settings.red_planet_color, settings.red_planet_opacity, tr("insp.fire")),
+            (settings.blue_planet_color, settings.blue_planet_opacity, tr("insp.ice")),
         ):
             dot = QLabel()
             dot.setFixedSize(11, 11)
@@ -758,11 +763,11 @@ class RenderConfirmDialog(QDialog):
         root.addWidget(card)
 
         btn_row = QHBoxLayout()
-        btn_edit = QPushButton("설정 수정...")
+        btn_edit = QPushButton(tr("conf.btn_edit"))
         btn_edit.clicked.connect(self._request_edit)
-        btn_cancel = QPushButton("취소")
+        btn_cancel = QPushButton(tr("btn.cancel"))
         btn_cancel.clicked.connect(self.reject)
-        btn_go = QPushButton("렌더링 시작")
+        btn_go = QPushButton(tr("conf.btn_start"))
         btn_go.setObjectName("primaryBtn")
         btn_go.setDefault(True)
         btn_go.clicked.connect(self.accept)

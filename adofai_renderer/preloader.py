@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
 from .gpu_detect import HardwareCapabilities, detect_hardware, find_adofai_dir
+from .i18n import tr
 from .level_info import AdofaiLevelInfo, parse_adofai_info
 from .level_loader import estimate_level_duration_sec, find_adofai_in_directory
 from .paths import get_agent_dll_path, get_default_output_dir
@@ -59,7 +60,7 @@ def run_startup_preload(
             progress_cb(step, total_steps, title, detail, pct)
 
     # Step 1: Cache folders & Steam ADOFAI / Doorstop discovery
-    emit(1, "엔진 경로 확인", "Steam ADOFAI 및 Unity Doorstop 구성 확인 중...", 10.0)
+    emit(1, tr("preload.s1_title"), tr("preload.s1_detail"), 10.0)
     for sub in ("jobs", "sfx", "previews", "extracted_zips"):
         os.makedirs(os.path.join(CACHE_ROOT, sub), exist_ok=True)
     os.makedirs(get_default_output_dir(), exist_ok=True)
@@ -74,11 +75,11 @@ def run_startup_preload(
         warnings.append("Steam ADOFAI 설치 경로를 자동 감지하지 못했습니다. 파일 메뉴에서 경로를 지정해 주세요.")
 
     # Step 2: Hardware GPU, VRAM & FFmpeg encoder verification
-    emit(2, "GPU · 인코더 프로브", "외장/내장 GPU 및 FFmpeg 하드웨어 인코더 실동작 검증 중...", 32.0)
+    emit(2, tr("preload.s2_title"), tr("preload.s2_detail"), 32.0)
     caps = detect_hardware(verify_hw=True)
 
     # Step 3: Verify / compile C# offline render agent DLL
-    emit(3, "오프라인 렌더 에이전트", "AdofaiRenderAgent.dll 무결성 및 빌드 상태 확인 중...", 56.0)
+    emit(3, tr("preload.s3_title"), tr("preload.s3_detail"), 56.0)
     agent_dll = get_agent_dll_path()
     if adofai_dir and not os.path.isfile(agent_dll):
         try:
@@ -88,7 +89,7 @@ def run_startup_preload(
             warnings.append(f"C# 에이전트 자동 빌드 실패: {ex}")
 
     # Step 4: Pre-warm critical Unity & ADOFAI binaries into OS page cache (0 quality loss)
-    emit(4, "Unity 엔진 프리워밍", "핵심 UnityPlayer · Assembly-CSharp 바이너리 메모리 캐싱 중...", 78.0)
+    emit(4, tr("preload.s4_title"), tr("preload.s4_detail"), 78.0)
     warm_targets = [agent_dll]
     if adofai_dir:
         data_dir = os.path.join(adofai_dir, "A Dance of Fire and Ice_Data")
@@ -102,7 +103,7 @@ def run_startup_preload(
     warmed_mb = _warm_file_os_cache(warm_targets, max_mb=96.0)
 
     # Step 5: Pre-scan workspace sample levels & metadata
-    emit(5, "워크스페이스 초기화", "로컬 샘플 레벨 메타데이터 및 타임라인 길이 분석 중...", 94.0)
+    emit(5, tr("preload.s5_title"), tr("preload.s5_detail"), 94.0)
     samples: List[Tuple[str, str, AdofaiLevelInfo, float]] = []
     sample_root = os.path.join(PROJECT_ROOT, "level")
     if os.path.isdir(sample_root):
@@ -117,7 +118,7 @@ def run_startup_preload(
                 samples.append((entry, cands[0], info, dur))
 
     elapsed = time.monotonic() - t0
-    emit(5, "준비 완료", f"모든 시스템 준비 완료 ({elapsed:.1f}s · 캐시 {warmed_mb:.0f}MB)", 100.0)
+    emit(5, tr("preload.done_title"), tr("preload.done_detail", elapsed=elapsed, mb=warmed_mb), 100.0)
 
     return PreloadResult(
         caps=caps,

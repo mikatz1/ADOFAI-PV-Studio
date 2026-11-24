@@ -8,6 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
+from ..i18n import tr
 from .theme import ACCENT_PLAYHEAD, format_timecode
 
 
@@ -428,27 +429,27 @@ class TimelineTrimWidget(QWidget):
         p.drawLine(QPointF(0, fx.bottom() + 1), QPointF(self.GUTTER_W - 1, fx.bottom() + 1))
 
         mono8 = QFont("Cascadia Mono", 8)
-        ui8 = QFont("Malgun Gothic", 8)
+        ui8 = QFont("Segoe UI", 8)
         p.setFont(mono8)
         p.setPen(QColor("#7e7e7e"))
         p.drawText(QRectF(8, 0, self.GUTTER_W - 12, self.RULER_H), Qt.AlignLeft | Qt.AlignVCenter, f"BPM {int(round(self._bpm))}")
 
-        # Track 1: 영상 (neutral monochrome NLE track header, zero decorative stripes)
+        # Track 1: Video
         p.setFont(ui8)
         p.setPen(QColor("#c8c8c8"))
-        p.drawText(QRectF(8, v1.top(), 72, v1.height()), Qt.AlignLeft | Qt.AlignVCenter, "V1 영상")
+        p.drawText(QRectF(8, v1.top(), 72, v1.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_v1"))
         self._draw_icon_toggle(p, self._btn_v1_vis(), "eye", self._show_filmstrip)
 
-        # Track 2: 채보 효과
-        p.setFont(QFont("Malgun Gothic", 7))
+        # Track 2: Chart FX events
+        p.setFont(QFont("Segoe UI", 7))
         p.setPen(QColor("#a0a0a0"))
-        p.drawText(QRectF(8, fx.top(), 72, fx.height()), Qt.AlignLeft | Qt.AlignVCenter, "FX 효과")
+        p.drawText(QRectF(8, fx.top(), 72, fx.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_fx"))
         self._draw_icon_toggle(p, self._btn_fx_vis(), "bars", self._show_fx)
 
-        # Track 3: 오디오
+        # Track 3: Audio
         p.setFont(ui8)
         p.setPen(QColor("#c8c8c8"))
-        p.drawText(QRectF(8, a1.top(), 58, a1.height()), Qt.AlignLeft | Qt.AlignVCenter, "A1 오디오")
+        p.drawText(QRectF(8, a1.top(), 58, a1.height()), Qt.AlignLeft | Qt.AlignVCenter, tr("tl.track_a1"))
         self._draw_icon_toggle(p, self._btn_a1_mute(), "mute", self._audio_muted, active_bg="#662c30", active_border="#803c42")
         self._draw_icon_toggle(p, self._btn_a1_wave(), "wave", self._show_waveform)
 

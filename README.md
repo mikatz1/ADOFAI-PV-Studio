@@ -76,10 +76,10 @@ python render.py "level\...\CDF2.adofai" -o "output\custom.mp4" --gpu-limit 60 -
 # 단일 실행 파일 + 바탕화면 바로가기 빌드
 powershell -ExecutionPolicy Bypass -File build_exe.ps1
 
-# Inno Setup 6 설치 마법사 빌드 (dist\installer\ADOFAI_PV_Renderer_Setup_2.0.3.exe)
+# Inno Setup 6 설치 마법사 빌드 (dist\installer\ADOFAI_PV_Renderer_Setup_2.0.4.exe)
 powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
-- `dist\ADOFAI PV Renderer.exe` 단일 실행 파일(아이콘 `assets\app_icon.ico` 및 C# 에이전트 DLL 내장)과 한국어/영어 Inno Setup 6 설치 마법사(`dist\installer\ADOFAI_PV_Renderer_Setup_2.0.3.exe`)를 생성합니다.
+- `dist\ADOFAI PV Renderer.exe` 단일 실행 파일(아이콘 `assets\app_icon.ico` 및 C# 에이전트 DLL 내장)과 한국어/영어 Inno Setup 6 설치 마법사(`dist\installer\ADOFAI_PV_Renderer_Setup_2.0.4.exe`)를 생성합니다.
 
 ### 업데이트 (자동 업데이트 확인)
 
