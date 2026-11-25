@@ -21,7 +21,7 @@ _ALLOWED_HOSTS = (
     "https://objects.githubusercontent.com/",
     "https://release-assets.githubusercontent.com/",
 )
-_UA = "ADOFAI-PV-Renderer-Updater"
+_UA = "ADOFAI-PV-Studio-Updater"
 
 
 @dataclass

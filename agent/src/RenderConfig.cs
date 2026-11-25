@@ -45,9 +45,15 @@ namespace AdofaiRenderAgent
         public bool experimentalOptimizeRender = false;
         public bool previewMode = false;
         public int startFloor = -1; // >0: start the level from this floor via the game's own checkpoint (play-from-here) path instead of simulating from 0
-        public bool fastStart = true; // jump to a checkpoint floor shortly before startSec instead of simulating from the beginning
+        public bool fastStart = true; // jump to a checkpoint floor shortly before startSec via official ResetScene+Play(ck, true) scrub
         public bool arcTails = true; // re-emit planet tail particles along the true orbit arc between ticks
         public int captureStride = 1; // 1 = capture every simulated frame (final render); >1 = rough preview decimation
+
+        // Resident warm-session keep-alive (reuses loaded level/decorations/textures across proxy -> final render)
+        public bool keepAliveAfterFinish = false;
+        public string sessionDir = "";
+        public int parentPid = 0;
+        public int idleTimeoutSec = 300;
     }
 
     public static class AgentLog

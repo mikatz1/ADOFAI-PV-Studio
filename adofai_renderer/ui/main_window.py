@@ -64,6 +64,7 @@ from ..render_runner import (
     compute_preview_cache_key,
     estimate_output_size_mb,
     estimate_render_time_sec,
+    get_warm_session_manager,
     load_proxy_settings,
     save_proxy_settings,
 )
@@ -196,11 +197,12 @@ class UpdateDownloadWorker(QThread):
 
 
 class PreviewBuildWorker(QThread):
-    progress = Signal(object)
-    done = Signal(object)
+    progress = Signal(int, object)
+    done = Signal(int, object)
 
     def __init__(
         self,
+        gen_id: int,
         runner: RenderRunner,
         level_path: str,
         adofai_dir: str,
@@ -215,6 +217,7 @@ class PreviewBuildWorker(QThread):
         proxy_fps: int = DEFAULT_PROXY_FPS,
     ) -> None:
         super().__init__()
+        self.gen_id = int(gen_id)
         self.runner = runner
         self.level_path = level_path
         self.adofai_dir = adofai_dir
@@ -238,12 +241,12 @@ class PreviewBuildWorker(QThread):
             blue_opacity=self.blue_opacity,
             gpu_limit_percent=self.gpu_limit,
             force_rebuild=self.force_rebuild,
-            progress_cb=lambda p: self.progress.emit(p),
+            progress_cb=lambda p: self.progress.emit(self.gen_id, p),
             proxy_width=self.proxy_width,
             proxy_height=self.proxy_height,
             proxy_fps=self.proxy_fps,
         )
-        self.done.emit(res)
+        self.done.emit(self.gen_id, res)
 
 
 class StereoDbMeter(QWidget):
@@ -355,7 +358,7 @@ class StereoDbMeter(QWidget):
 
 
 class _ViewportOverlayCard(QFrame):
-    """Viewport overlay dialog card with pastel-blue/pink skewed accent header in Light Mode."""
+    """Viewport overlay dialog card with pastel-blue/pink top accent ribbon in Light Mode."""
 
     def paintEvent(self, _ev) -> None:
         pal = get_palette()
@@ -371,18 +374,6 @@ class _ViewportOverlayCard(QFrame):
             clip = QPainterPath()
             clip.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 7.5, 7.5)
             p.setClipPath(clip)
-
-            # Subtle skewed geometric stripes in upper-right corner
-            for col_hex, x0, w in (("#EAF5FF", r.right() - 78, 16), ("#FFEBF4", r.right() - 54, 11)):
-                poly = QPainterPath()
-                poly.moveTo(x0, r.top())
-                poly.lineTo(x0 + w, r.top())
-                poly.lineTo(x0 + w - 22, r.top() + 56)
-                poly.lineTo(x0 - 22, r.top() + 56)
-                poly.closeSubpath()
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(col_hex))
-                p.drawPath(poly)
 
             grad = QLinearGradient(r.left(), r.top(), r.right(), r.top())
             grad.setColorAt(0.0, QColor("#58BCFF"))
@@ -604,22 +595,6 @@ class PreviewViewportWidget(QWidget):
             st_grad.setColorAt(1.0, QColor("#FDEFF7"))
             p.fillRect(stage, st_grad)
 
-            # Subtle diagonal pastel accent stripes in far corners
-            p.setPen(Qt.NoPen)
-            for col_hex, x0, w in (
-                ("#D2E8FD", stage.right() - 165, 36),
-                ("#FCE1EF", stage.right() - 115, 22),
-                ("#DCEEFD", stage.left() + 40, 26),
-            ):
-                poly = QPainterPath()
-                poly.moveTo(x0, stage.top())
-                poly.lineTo(x0 + w, stage.top())
-                poly.lineTo(x0 + w - 95, stage.bottom())
-                poly.lineTo(x0 - 95, stage.bottom())
-                poly.closeSubpath()
-                p.setBrush(QColor(col_hex))
-                p.drawPath(poly)
-
             # Delicate blueprint grid lines inside empty stage
             p.setPen(QPen(QColor(174, 204, 236, 90), 1))
             gstep = 36
@@ -730,7 +705,7 @@ class ColorPickerButton(QPushButton):
 
 
 class _PaneHeaderBar(QFrame):
-    """Dock pane header featuring subtle dual-tone skewed slash marks in Pastel Light mode."""
+    """Dock pane header with clean typography and crisp border."""
 
     def __init__(self, left_title: str, right_text: str = "", on_close=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -763,7 +738,7 @@ class _PaneHeaderBar(QFrame):
     def apply_theme(self) -> None:
         pal = get_palette()
         self.setFixedHeight(25 if pal.is_light else 22)
-        self._lay.setContentsMargins(24 if pal.is_light else 8, 0, 6 if self._has_close else 10, 0)
+        self._lay.setContentsMargins(10 if pal.is_light else 8, 0, 6 if self._has_close else 10, 0)
         self.setStyleSheet("QFrame#paneHdr { background: transparent; border: none; }")
         self.l_lbl.setStyleSheet(
             f"color: {pal.hdr_title}; font-size: 11px; font-weight: {'700' if pal.is_light else '600'}; background: transparent; border: none;"
@@ -785,35 +760,8 @@ class _PaneHeaderBar(QFrame):
     def paintEvent(self, _ev) -> None:
         pal = get_palette()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
         r = self.rect()
         p.fillRect(r, QColor(pal.hdr_bg))
-
-        if pal.is_light:
-            # Dual skewed parallelograms (Pastel Sky Blue + Pastel Pink)
-            h = float(r.height())
-            y0, y1 = 6.0, h - 6.0
-            slant = 3.2
-            p.setPen(Qt.NoPen)
-
-            blue_poly = QPainterPath()
-            blue_poly.moveTo(8.0 + slant, y0)
-            blue_poly.lineTo(13.0 + slant, y0)
-            blue_poly.lineTo(13.0, y1)
-            blue_poly.lineTo(8.0, y1)
-            blue_poly.closeSubpath()
-            p.setBrush(QColor("#47A8FF"))
-            p.drawPath(blue_poly)
-
-            pink_poly = QPainterPath()
-            pink_poly.moveTo(15.0 + slant, y0)
-            pink_poly.lineTo(18.2 + slant, y0)
-            pink_poly.lineTo(18.2, y1)
-            pink_poly.lineTo(15.0, y1)
-            pink_poly.closeSubpath()
-            p.setBrush(QColor("#F484B6"))
-            p.drawPath(pink_poly)
-
         p.setPen(QPen(QColor(pal.hdr_border), 1))
         p.drawLine(0, r.height() - 1, r.width(), r.height() - 1)
         p.end()
@@ -849,7 +797,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, preload: PreloadResult, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("ADOFAI PV Renderer")
+        self.setWindowTitle("ADOFAI PV Studio")
         self.setMinimumSize(1020, 660)
         self.resize(1220, 720)
         self.setAcceptDrops(True)
@@ -914,6 +862,9 @@ class MainWindow(QMainWindow):
         self._wf_workers: List[WaveformWorker] = []
         self._preview_worker: Optional[PreviewBuildWorker] = None
         self._preview_runner: Optional[RenderRunner] = None
+        self._preview_gen_id: int = 0
+        self._live_preview_workers: List[PreviewBuildWorker] = []
+        self._pending_preview_action: Optional[str] = None
         self._syncing_controls: bool = False
 
         self._pane_headers: List[_PaneHeaderBar] = []
@@ -928,10 +879,6 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self.apply_theme()
         self._refresh_summary_ui()
-
-        if preload.sample_levels:
-            _name, spath, sinfo, sdur = preload.sample_levels[0]
-            self._load_level(spath, pre_info=sinfo, pre_duration=sdur)
 
         self.setWindowOpacity(0.0)
         self._fade_in = QPropertyAnimation(self, b"windowOpacity")
@@ -951,19 +898,6 @@ class MainWindow(QMainWindow):
         self.act_open.setShortcut(QKeySequence("Ctrl+O"))
         self.act_open.triggered.connect(lambda _=False: self._open_file_dialog())
         self.m_file.addAction(self.act_open)
-
-        self.m_samples = QMenu(tr("menu.samples"), self)
-        self.act_samples_empty: Optional[QAction] = None
-        if self.preload.sample_levels:
-            for _name, spath, sinfo, sdur in self.preload.sample_levels:
-                a = QAction(f"{sinfo.display_title} ({format_timecode(sdur)})", self)
-                a.triggered.connect(lambda _=False, p=spath, i=sinfo, d=sdur: self._load_level(p, i, d))
-                self.m_samples.addAction(a)
-        else:
-            self.act_samples_empty = QAction(tr("menu.samples_empty"), self)
-            self.act_samples_empty.setEnabled(False)
-            self.m_samples.addAction(self.act_samples_empty)
-        self.m_file.addMenu(self.m_samples)
 
         self.m_file.addSeparator()
         self.act_steam = QAction(tr("menu.steam_dir"), self)
@@ -1717,7 +1651,10 @@ class MainWindow(QMainWindow):
         pre_duration: Optional[float] = None,
     ) -> None:
         self._stop_playback()
+        if self._is_preview_busy():
+            self._cancel_active_preview(next_action=None)
         self.level_path = os.path.abspath(adofai_path)
+        get_warm_session_manager().shutdown_if_different_level(self.level_path)
         self.level_info = pre_info or parse_adofai_info(self.level_path)
         self.level_duration = (
             pre_duration if (pre_duration and pre_duration > 1.0)
@@ -1738,7 +1675,7 @@ class MainWindow(QMainWindow):
         self.sld_zoom.blockSignals(False)
         self.lbl_zoom_val.setText("100%")
 
-        self.setWindowTitle(f"{self.level_info.display_title} — ADOFAI PV Renderer")
+        self.setWindowTitle(f"{self.level_info.display_title} — ADOFAI PV Studio")
         self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
         self._update_vp_mode_label()
         detail = tr(
@@ -1827,6 +1764,112 @@ class MainWindow(QMainWindow):
             self._refresh_trim_summary()
 
     # ------------------------------------------------------------------ Proxy Builder
+    def _is_preview_busy(self) -> bool:
+        return bool(self._live_preview_workers)
+
+    def _set_render_actions_enabled(self, enabled: bool) -> None:
+        self.btn_render.setEnabled(enabled)
+        self.act_render.setEnabled(enabled)
+
+    def _reset_viewport_for_level(self) -> None:
+        self._stop_playback()
+        self._audio_player.setSource(QUrl())
+        self.viewport.clear_video()
+        self.timeline.set_filmstrip("")
+        if self.level_info:
+            detail = tr(
+                "vp.level_detail",
+                bpm=self.level_info.bpm,
+                tiles=self.level_info.tile_count,
+                decos=self.level_info.decoration_count,
+                filts=len(self.level_info.filters),
+            )
+            self.viewport.set_level_placeholder(self.level_info.display_title, detail)
+        self._try_load_cached_preview()
+        if not self.viewport.has_video() and self.level_info and self.level_info.song_path and os.path.isfile(self.level_info.song_path):
+            self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
+            self._start_waveform_worker(self.level_info.song_path)
+        self._update_vp_mode_label()
+
+    def _cancel_active_preview(self, next_action: Optional[str] = None) -> bool:
+        was_busy = self._is_preview_busy()
+        self._preview_gen_id += 1
+        self._pending_preview_action = next_action if was_busy else None
+
+        runner = self._preview_runner
+        self._preview_runner = None
+        self._preview_worker = None
+
+        if runner is not None:
+            runner.cancel()
+        for lw in list(self._live_preview_workers):
+            if getattr(lw, "runner", None) is not None:
+                lw.runner.cancel()
+
+        if was_busy and next_action in ("restart", "restart_force"):
+            pw = self.proxy_state["width"]
+            ph = self.proxy_state["height"]
+            pf = self.proxy_state["fps"]
+            self._set_render_actions_enabled(False)
+            self.sb_state.setText(tr("sb.previewing"))
+            self.viewport.set_generating_state(True, tr("vp.gen_restarting", w=pw, h=ph, fps=pf), 3.0)
+        elif was_busy and next_action == "clear_cache":
+            self._set_render_actions_enabled(False)
+            self.sb_state.setText(tr("sb.previewing"))
+            self.viewport.set_generating_state(True, tr("vp.gen_cancelling"), 2.0)
+        elif not was_busy:
+            self._set_render_actions_enabled(True)
+            self.sb_state.setText(tr("sb.ready"))
+            self.viewport.set_generating_state(False)
+        else:
+            # Cancelled without restart (e.g. loading another level): keep render locked briefly until Unity exits
+            self._set_render_actions_enabled(False)
+            self.sb_state.setText(tr("sb.ready"))
+            self.viewport.set_generating_state(False)
+
+        return was_busy
+
+    def _on_preview_thread_finished(self, worker: PreviewBuildWorker) -> None:
+        if worker in self._live_preview_workers:
+            self._live_preview_workers.remove(worker)
+        was_current = (self._preview_worker is worker)
+        if was_current:
+            self._preview_worker = None
+            self._preview_runner = None
+        worker.deleteLater()
+
+        if self._live_preview_workers:
+            return
+
+        action = self._pending_preview_action
+        self._pending_preview_action = None
+
+        if action in ("restart", "restart_force"):
+            if self.level_path and os.path.isfile(self.level_path):
+                force = (action == "restart_force")
+                if not force:
+                    self._reset_viewport_for_level()
+                    if self.viewport.has_video():
+                        self._set_render_actions_enabled(True)
+                        self.viewport.set_generating_state(False)
+                        self.sb_state.setText(tr("sb.ready"))
+                        self.statusBar().showMessage(tr("sb.preview_loaded"), 4000)
+                        return
+                self._start_preview_build(force_rebuild=force)
+                return
+        elif action == "clear_cache":
+            self._set_render_actions_enabled(True)
+            self.viewport.set_generating_state(False)
+            self.sb_state.setText(tr("sb.ready"))
+            self._do_clear_preview_cache()
+            return
+
+        if not was_current:
+            # A cancelled/retired worker finished with no queued follow-up action
+            self._set_render_actions_enabled(True)
+            self.viewport.set_generating_state(False)
+            self.sb_state.setText(tr("sb.ready"))
+
     def _open_proxy_dialog(self) -> None:
         dlg = ProxySettingsDialog(
             width=self.proxy_state["width"],
@@ -1843,23 +1886,12 @@ class MainWindow(QMainWindow):
             )
             self.proxy_state = save_proxy_settings(pw, ph, pf)
             if changed and self.level_path:
-                self._stop_playback()
-                self._audio_player.setSource(QUrl())
-                self.viewport.clear_video()
-                self.timeline.set_filmstrip("")
-                if self.level_info:
-                    detail = tr(
-                        "vp.level_detail",
-                        bpm=self.level_info.bpm,
-                        tiles=self.level_info.tile_count,
-                        decos=self.level_info.decoration_count,
-                        filts=len(self.level_info.filters),
-                    )
-                    self.viewport.set_level_placeholder(self.level_info.display_title, detail)
-                self._try_load_cached_preview()
-                if not self.viewport.has_video() and self.level_info and self.level_info.song_path and os.path.isfile(self.level_info.song_path):
-                    self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
-                    self._start_waveform_worker(self.level_info.song_path)
+                if self._is_preview_busy():
+                    self._cancel_active_preview(next_action="restart")
+                    self._update_vp_mode_label()
+                    self.statusBar().showMessage(tr("sb.proxy_restarting", w=pw, h=ph, fps=pf), 4000)
+                    return
+                self._reset_viewport_for_level()
             self._update_vp_mode_label()
             self.statusBar().showMessage(tr("sb.proxy_updated", w=pw, h=ph, fps=pf), 4000)
 
@@ -1867,19 +1899,32 @@ class MainWindow(QMainWindow):
         if not self.level_path or not os.path.isfile(self.level_path):
             QMessageBox.information(self, tr("dlg.no_level_title"), tr("dlg.no_level_preview_msg"))
             return
-        if self._preview_worker is not None and self._preview_worker.isRunning():
+        if self._preview_worker is not None:
+            return
+        if self._live_preview_workers:
+            # Previous cancelled proxy job is still winding down; queue this build cleanly
+            self._pending_preview_action = "restart_force" if force_rebuild else "restart"
+            pw = self.proxy_state["width"]
+            ph = self.proxy_state["height"]
+            pf = self.proxy_state["fps"]
+            self._set_render_actions_enabled(False)
+            self.sb_state.setText(tr("sb.previewing"))
+            self.viewport.set_generating_state(True, tr("vp.gen_restarting", w=pw, h=ph, fps=pf), 3.0)
             return
 
         self._stop_playback()
         if force_rebuild:
             self._audio_player.setSource(QUrl())
             self.viewport.clear_video()
-        self.btn_render.setEnabled(False)
+        self._set_render_actions_enabled(False)
         self.sb_state.setText(tr("sb.previewing"))
         self.viewport.set_generating_state(True, tr("vp.gen_engine_prep"), 5.0)
 
+        self._preview_gen_id += 1
+        gen_id = self._preview_gen_id
         self._preview_runner = RenderRunner(caps=self.caps)
-        self._preview_worker = PreviewBuildWorker(
+        worker = PreviewBuildWorker(
+            gen_id=gen_id,
             runner=self._preview_runner,
             level_path=self.level_path,
             adofai_dir=self.adofai_dir,
@@ -1893,24 +1938,39 @@ class MainWindow(QMainWindow):
             proxy_height=self.proxy_state["height"],
             proxy_fps=self.proxy_state["fps"],
         )
-        self._preview_worker.progress.connect(self._on_preview_progress)
-        self._preview_worker.done.connect(self._on_preview_done)
-        self._preview_worker.start()
+        self._preview_worker = worker
+        self._live_preview_workers.append(worker)
+        worker.progress.connect(self._on_preview_progress)
+        worker.done.connect(self._on_preview_done)
+        worker.finished.connect(lambda w=worker: self._on_preview_thread_finished(w))
+        worker.start()
 
-    def _on_preview_progress(self, p: RenderProgress) -> None:
+    def _on_preview_progress(self, gen_id: int, p: RenderProgress) -> None:
+        if gen_id != self._preview_gen_id:
+            return
         self.viewport.set_generating_state(True, p.message, p.percent)
 
-    def _on_preview_done(self, res: PreviewResult) -> None:
-        self.btn_render.setEnabled(True)
+    def _on_preview_done(self, gen_id: int, res: PreviewResult) -> None:
+        if gen_id != self._preview_gen_id:
+            return
+        self._set_render_actions_enabled(True)
         self.viewport.set_generating_state(False)
         self.sb_state.setText(tr("sb.ready"))
         if res.success:
             self._apply_preview_video(res.video_path, res.filmstrip_path, res.duration_sec)
             self.statusBar().showMessage(tr("sb.preview_loaded"), 4000)
         else:
+            if not self.viewport.has_video() and self.level_info:
+                self._reset_viewport_for_level()
             QMessageBox.warning(self, tr("dlg.preview_fail_title"), res.error or tr("dlg.preview_fail_default"))
 
     def _clear_preview_cache(self) -> None:
+        if self._is_preview_busy():
+            self._cancel_active_preview(next_action="clear_cache")
+            return
+        self._do_clear_preview_cache()
+
+    def _do_clear_preview_cache(self) -> None:
         self._stop_playback()
         self._audio_player.setSource(QUrl())
         self.viewport.clear_video()
@@ -2136,23 +2196,33 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if dlg.exec() == dlg.DialogCode.Accepted:
-            self.planet_state = {
+            new_state = {
                 "red_color": dlg.red_color,
                 "red_opacity": dlg.red_opacity,
                 "blue_color": dlg.blue_color,
                 "blue_opacity": dlg.blue_opacity,
             }
+            changed = new_state != self.planet_state
+            self.planet_state = new_state
             self._refresh_summary_ui()
-            self._try_load_cached_preview()
+            if changed and self.level_path:
+                if self._is_preview_busy():
+                    self._cancel_active_preview(next_action="restart")
+                else:
+                    self._try_load_cached_preview()
 
     def _reset_planet_defaults(self) -> None:
-        self.planet_state = {
+        new_state = {
             "red_color": "#FF0000",
             "red_opacity": 1.0,
             "blue_color": "#0000FF",
             "blue_opacity": 1.0,
         }
+        changed = new_state != self.planet_state
+        self.planet_state = new_state
         self._refresh_summary_ui()
+        if changed and self.level_path and self._is_preview_busy():
+            self._cancel_active_preview(next_action="restart")
 
     def _open_sequence_dialog(self) -> None:
         dlg = SequenceSettingsDialog(
@@ -2311,13 +2381,12 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _is_busy_for_update(self) -> bool:
-        pw = getattr(self, "_preview_worker", None)
-        return bool(pw is not None and pw.isRunning()) or not self.btn_render.isEnabled()
+        return self._is_preview_busy() or not self.btn_render.isEnabled()
 
     def _show_about(self) -> None:
         QMessageBox.information(
             self,
-            "ADOFAI PV Renderer",
+            "ADOFAI PV Studio",
             tr("dlg.about_body", ver=__version__),
         )
 
@@ -2355,6 +2424,8 @@ class MainWindow(QMainWindow):
         )
 
     def _open_render_confirm(self) -> None:
+        if self._is_preview_busy():
+            return
         if not self.level_path or not os.path.isfile(self.level_path):
             QMessageBox.warning(self, tr("dlg.no_level_title"), tr("dlg.no_level_render_msg"))
             return
@@ -2640,9 +2711,6 @@ class MainWindow(QMainWindow):
         # Menus & actions
         self.m_file.setTitle(tr("menu.file"))
         self.act_open.setText(tr("menu.open_level"))
-        self.m_samples.setTitle(tr("menu.samples"))
-        if self.act_samples_empty is not None:
-            self.act_samples_empty.setText(tr("menu.samples_empty"))
         self.act_steam.setText(tr("menu.steam_dir"))
         self.act_quit.setText(tr("menu.quit"))
 
@@ -2687,9 +2755,10 @@ class MainWindow(QMainWindow):
             hdr.retranslate_ui()
 
         # Viewer & Inspector headers / tabs / labels
+        preview_busy = self._is_preview_busy()
         if self.level_path:
             self.lbl_vp_title.setText(tr("vp.header_file", name=os.path.basename(self.level_path)))
-            if not self.viewport.has_video() and self.level_info:
+            if not preview_busy and not self.viewport.has_video() and self.level_info:
                 detail = tr(
                     "vp.level_detail",
                     bpm=self.level_info.bpm,
@@ -2758,7 +2827,29 @@ class MainWindow(QMainWindow):
         self.sld_vol.setToolTip(tr("tl.tip_vol"))
         self.sld_zoom.setToolTip(tr("tl.tip_zoom"))
         self.btn_fit.setText(tr("tl.btn_fit"))
-        self.sb_state.setText(tr("sb.ready"))
+        self.sb_state.setText(tr("sb.previewing") if preview_busy else tr("sb.ready"))
 
         self._refresh_summary_ui()
         self.timeline.update()
+
+    def closeEvent(self, event) -> None:
+        self._stop_playback()
+        self._pending_preview_action = None
+        self._preview_gen_id += 1
+        if self._preview_runner is not None:
+            self._preview_runner.cancel(force_kill=True)
+        workers = list(self._live_preview_workers)
+        for lw in workers:
+            if getattr(lw, "runner", None) is not None:
+                lw.runner.cancel(force_kill=True)
+        for w in workers:
+            if w.isRunning():
+                w.wait(2500)
+        self._live_preview_workers.clear()
+        self._preview_worker = None
+        self._preview_runner = None
+        for wf in list(self._wf_workers):
+            if wf.isRunning():
+                wf.wait(1000)
+        get_warm_session_manager().shutdown(force=True)
+        super().closeEvent(event)

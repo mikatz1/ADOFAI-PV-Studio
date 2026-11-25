@@ -1,4 +1,4 @@
-"""Command-line interface for ADOFAI Offline PV Renderer."""
+"""Command-line interface for ADOFAI PV Studio."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def parse_resolution(value: str) -> tuple[int, int]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="adofai_renderer",
-        description="ADOFAI 결정론적 오프라인 PV 렌더러 (GUI / CLI)",
+        description="ADOFAI PV Studio — 결정론적 오프라인 PV 렌더링 스튜디오 (GUI / CLI)",
     )
     p.add_argument("level", nargs="?", help="렌더링할 .adofai 파일, 레벨 폴더, 또는 .zip 압축 파일 경로")
     p.add_argument("-o", "--output", help="출력 영상 파일 경로 (.mp4 또는 .mkv)")
@@ -77,7 +77,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
     adofai_dir = args.adofai_dir or find_adofai_dir() or ""
 
     if args.info or not args.level:
-        print("=== ADOFAI Offline PV Renderer 환경 정보 ===")
+        print("=== ADOFAI PV Studio 환경 정보 ===")
         print(f"Steam ADOFAI 경로 : {adofai_dir or '(미감지)'}")
         print(f"FFmpeg 경로       : {caps.ffmpeg_path}")
         print("감지된 GPU        :")
@@ -149,6 +149,8 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
         substeps=args.substeps,
     )
 
+    # One-shot CLI exits immediately after a single render, so don't park a resident warm process
+    os.environ.setdefault("ADOFAI_WARM_SESSION", "0")
     runner = RenderRunner(caps=caps)
     last_line_len = [0]
 

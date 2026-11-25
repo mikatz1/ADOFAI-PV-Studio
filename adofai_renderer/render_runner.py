@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -33,7 +34,6 @@ PERF_PROFILE_PATH = os.path.join(CACHE_ROOT, "perf_profile.json")
 PROXY_SETTINGS_PATH = os.path.join(CACHE_ROOT, "proxy_settings.json")
 
 PROXY_RES_PRESETS: List[Tuple[str, int, int]] = [
-    ("256 × 144  (144p)", 256, 144),
     ("426 × 240  (240p)", 426, 240),
     ("480 × 270  (270p)", 480, 270),
     ("640 × 360  (360p)", 640, 360),
@@ -47,9 +47,9 @@ DEFAULT_PROXY_FPS = 12
 
 
 def clamp_proxy_spec(width: int, height: int, fps: int) -> Tuple[int, int, int]:
-    """Clamp proxy dimensions to even 144p..720p bounds and FPS to 5..60."""
-    w = max(256, min(1280, int(width or DEFAULT_PROXY_WIDTH)))
-    h = max(144, min(720, int(height or DEFAULT_PROXY_HEIGHT)))
+    """Clamp proxy dimensions to even 240p..720p bounds and FPS to 5..60."""
+    w = max(426, min(1280, int(width or DEFAULT_PROXY_WIDTH)))
+    h = max(240, min(720, int(height or DEFAULT_PROXY_HEIGHT)))
     w = w - (w % 2)
     h = h - (h % 2)
     f = max(5, min(60, int(fps or DEFAULT_PROXY_FPS)))
@@ -100,7 +100,7 @@ def compute_preview_cache_key(
     key_src = (
         f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|"
         f"{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|"
-        f"{pw}x{ph}@{pf}|v6"
+        f"{pw}x{ph}@{pf}|v7"
     )
     return hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
 
@@ -374,6 +374,265 @@ def estimate_render_time_sec(
     return (overhead_sec + seek_sec + render_sec, target_frames, clip_dur)
 
 
+def _kill_process_tree(proc: Optional[subprocess.Popen]) -> None:
+    """Force-terminate a subprocess and all of its child processes (e.g. Unity + FFmpeg pipe)."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2.0)
+    except Exception:
+        pass
+
+
+class WarmSessionManager:
+    """Keeps one parked Unity ADOFAI process alive in IdleWarm between proxy & final renders of the same level.
+
+    Eliminates redundant Unity cold boot + .adofai parse + decoration texture/sprite/audio decoding
+    while guaranteeing zero orphan processes (parent PID watchdog + 5-min idle timeout + atexit/closeEvent).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
+        self._session_dir: str = ""
+        self._level_path: str = ""
+        self._level_mtime: float = 0.0
+        self._adofai_dir: str = ""
+        self._agent_dll: str = ""
+        self._agent_dll_mtime: float = 0.0
+        self._in_use: bool = False
+
+    @staticmethod
+    def _system_ram_gb() -> float:
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                class _MemStat(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+
+                ms = _MemStat()
+                ms.dwLength = ctypes.sizeof(_MemStat)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                    return float(ms.ullTotalPhys) / (1024.0 ** 3)
+            except Exception:
+                pass
+        return 16.0
+
+    @classmethod
+    def is_eligible(cls, caps: Optional[HardwareCapabilities]) -> bool:
+        if os.environ.get("ADOFAI_WARM_SESSION", "1") == "0":
+            return False
+        if caps is not None and caps.low_spec_recommended:
+            return False
+        ram_gb = cls._system_ram_gb()
+        if ram_gb > 0.1 and ram_gb < 10.0:
+            return False
+        return True
+
+    @staticmethod
+    def _norm(p: str) -> str:
+        return os.path.normcase(os.path.abspath(p)) if p else ""
+
+    @staticmethod
+    def _mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except Exception:
+            return 0.0
+
+    def has_warm_session_for(self, level_path: str) -> bool:
+        norm = self._norm(level_path)
+        with self._lock:
+            if self._proc is None or self._in_use:
+                return False
+            if self._proc.poll() is not None:
+                return False
+            if self._level_path != norm:
+                return False
+            return os.path.isfile(os.path.join(self._session_dir, "ready.json"))
+
+    def try_claim(
+        self, level_path: str, adofai_dir: str, agent_dll: str
+    ) -> Optional[Tuple[subprocess.Popen, str]]:
+        norm_lvl = self._norm(level_path)
+        norm_dir = self._norm(adofai_dir)
+        norm_dll = self._norm(agent_dll)
+        cur_lvl_mt = self._mtime(level_path)
+        cur_dll_mt = self._mtime(agent_dll)
+
+        with self._lock:
+            if self._proc is None or self._in_use:
+                return None
+            if self._proc.poll() is not None:
+                stale_dir = self._session_dir
+                self._clear_locked()
+                self._cleanup_dir(stale_dir)
+                return None
+            ready_path = os.path.join(self._session_dir, "ready.json")
+            if (
+                self._level_path == norm_lvl
+                and self._adofai_dir == norm_dir
+                and self._agent_dll == norm_dll
+                and abs(self._level_mtime - cur_lvl_mt) < 0.01
+                and abs(self._agent_dll_mtime - cur_dll_mt) < 0.01
+                and os.path.isfile(ready_path)
+            ):
+                self._in_use = True
+                return (self._proc, self._session_dir)
+            return None
+
+    def release_back_to_idle(
+        self,
+        proc: subprocess.Popen,
+        session_dir: str,
+        level_path: str,
+        adofai_dir: str,
+        agent_dll: str,
+    ) -> None:
+        old_proc: Optional[subprocess.Popen] = None
+        old_dir = ""
+        with self._lock:
+            if self._proc is not None and self._proc is not proc:
+                old_proc = self._proc
+                old_dir = self._session_dir
+            self._proc = proc
+            self._session_dir = session_dir
+            self._level_path = self._norm(level_path)
+            self._level_mtime = self._mtime(level_path)
+            self._adofai_dir = self._norm(adofai_dir)
+            self._agent_dll = self._norm(agent_dll)
+            self._agent_dll_mtime = self._mtime(agent_dll)
+            self._in_use = False
+        if old_proc is not None:
+            self._terminate_session(old_proc, old_dir, force=True)
+
+    def discard_active(
+        self,
+        proc: Optional[subprocess.Popen] = None,
+        session_dir: str = "",
+        force_kill: bool = True,
+    ) -> None:
+        target_proc = proc
+        target_dir = session_dir
+        with self._lock:
+            if target_proc is None or self._proc is target_proc:
+                if target_proc is None:
+                    target_proc = self._proc
+                if not target_dir:
+                    target_dir = self._session_dir
+                self._clear_locked()
+        self._terminate_session(target_proc, target_dir, force=force_kill)
+
+    def shutdown_if_different_level(self, new_level_path: str) -> None:
+        norm = self._norm(new_level_path)
+        proc: Optional[subprocess.Popen] = None
+        sdir = ""
+        with self._lock:
+            if self._proc is not None and not self._in_use and self._level_path != norm:
+                proc = self._proc
+                sdir = self._session_dir
+                self._clear_locked()
+        if proc is not None or sdir:
+            self._terminate_session(proc, sdir, force=False)
+
+    def shutdown(self, force: bool = False) -> None:
+        proc: Optional[subprocess.Popen] = None
+        sdir = ""
+        with self._lock:
+            if self._in_use and not force:
+                return
+            proc = self._proc
+            sdir = self._session_dir
+            self._clear_locked()
+        if proc is not None or sdir:
+            self._terminate_session(proc, sdir, force=force)
+
+    def _clear_locked(self) -> None:
+        self._proc = None
+        self._session_dir = ""
+        self._level_path = ""
+        self._level_mtime = 0.0
+        self._adofai_dir = ""
+        self._agent_dll = ""
+        self._agent_dll_mtime = 0.0
+        self._in_use = False
+
+    @staticmethod
+    def _cleanup_dir(sdir: str) -> None:
+        if sdir and os.path.isdir(sdir):
+            try:
+                shutil.rmtree(sdir, ignore_errors=True)
+            except Exception:
+                pass
+
+    @classmethod
+    def _terminate_session(cls, proc: Optional[subprocess.Popen], sdir: str, force: bool = False) -> None:
+        if sdir and os.path.isdir(sdir):
+            try:
+                with open(os.path.join(sdir, "shutdown.flag"), "w", encoding="utf-8") as sf:
+                    sf.write("shutdown")
+            except Exception:
+                pass
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    if not force:
+                        try:
+                            proc.wait(timeout=1.2)
+                        except Exception:
+                            pass
+                    if proc.poll() is None:
+                        _kill_process_tree(proc)
+            except Exception:
+                pass
+        cls._cleanup_dir(sdir)
+
+
+_WARM_SESSION_MANAGER = WarmSessionManager()
+
+
+def get_warm_session_manager() -> WarmSessionManager:
+    return _WARM_SESSION_MANAGER
+
+
+def shutdown_warm_session(force: bool = True) -> None:
+    _WARM_SESSION_MANAGER.shutdown(force=force)
+
+
+atexit.register(shutdown_warm_session, True)
+
+
 class RenderRunner:
     def __init__(self, caps: Optional[HardwareCapabilities] = None) -> None:
         self.caps = caps or detect_hardware(verify_hw=True)
@@ -381,14 +640,22 @@ class RenderRunner:
         self._cancel_sentinel_path: Optional[str] = None
         self._proc: Optional[subprocess.Popen] = None
 
-    def cancel(self) -> None:
+    def reset_cancel(self) -> None:
+        self._cancel_event.clear()
+
+    def cancel(self, force_kill: bool = False) -> None:
         self._cancel_event.set()
-        if self._cancel_sentinel_path:
+        sentinel = self._cancel_sentinel_path
+        if sentinel:
             try:
-                with open(self._cancel_sentinel_path, "w", encoding="utf-8") as f:
-                    f.write("cancel")
+                parent = os.path.dirname(sentinel)
+                if parent and os.path.isdir(parent):
+                    with open(sentinel, "w", encoding="utf-8") as f:
+                        f.write("cancel")
             except Exception:
                 pass
+        if force_kill:
+            _kill_process_tree(self._proc)
 
     def ensure_agent_built(self, adofai_dir: str, log_cb: Optional[Callable[[str], None]] = None) -> str:
         dll_path = get_agent_dll_path()
@@ -409,61 +676,31 @@ class RenderRunner:
             raise RuntimeError(f"AdofaiRenderAgent.dll 빌드 실패:\n{res.stdout}\n{res.stderr}")
         return AGENT_DLL_PATH
 
-    def _run_unity_pass(
+    def _poll_unity_pass(
         self,
-        adofai_dir: str,
-        adofai_exe: str,
-        agent_dll: str,
+        proc: subprocess.Popen,
         job_cfg: dict,
-        work_dir: str,
         start_sec: float,
         target_fps: int,
-        unity_extra_args: List[str],
         progress_cb: Optional[Callable[[RenderProgress], None]],
-        is_preview: bool = False,
-    ) -> Tuple[str, int, float, float]:
-        """Run a single Unity Doorstop offline pass. Returns (last_stage, frames, video_sec, render_fps)."""
-        job_json_path = os.path.join(work_dir, "job.json")
+        is_preview: bool,
+        keep_warm: bool,
+        ready_json_path: str,
+    ) -> Tuple[str, int, float, float, bool]:
+        """Poll progress.jsonl & process lifetime. Returns (last_stage, frames, video_sec, render_fps, stayed_warm)."""
         progress_path = job_cfg["progressPath"]
-        with open(job_json_path, "w", encoding="utf-8") as f:
-            json.dump(job_cfg, f, ensure_ascii=False, indent=2)
-
-        env = os.environ.copy()
-        env["ADOFAI_RENDER_JOB"] = job_json_path
-
-        # Offscreen camRT is independent of the host window size; keep dummy window compact (640x360)
-        # to minimize wasted swapchain work while maintaining full 16:9 aspect ratio.
-        win_w = "640"
-        win_h = "360"
-
-        cmd = [
-            adofai_exe,
-            "--doorstop-enabled", "true",
-            "--doorstop-target-assembly", agent_dll,
-            "-popupwindow",
-            "-screen-width", win_w,
-            "-screen-height", win_h,
-            "-screen-fullscreen", "0",
-        ] + unity_extra_args
-
-        startupinfo = None
-        if os.name == "nt":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 4  # SW_SHOWNOACTIVATE: never steal focus from GUI
-
-        proc = subprocess.Popen(cmd, cwd=adofai_dir, env=env, startupinfo=startupinfo)
-        self._proc = proc
-
         last_stage = "launching"
         last_frames = 0
         last_video_sec = 0.0
         last_render_fps = 0.0
         prog_offset = 0
         done_seen_at: Optional[float] = None
+        cancel_seen_at: Optional[float] = None
+        stayed_warm = False
         stride = max(1, int(job_cfg.get("captureStride", 1)))
         out_fps = max(1.0, float(target_fps) / float(stride))
 
+        self._proc = proc
         try:
             while True:
                 if os.path.isfile(progress_path):
@@ -521,7 +758,7 @@ class RenderRunner:
                                 "done": "비디오 프레임 렌더링 완료! 후처리 진행 중...",
                                 "cancelled": "렌더링이 취소되었습니다.",
                             }
-                            if progress_cb:
+                            if progress_cb and stage != "warm_failed":
                                 progress_cb(RenderProgress(
                                     stage=stage,
                                     frames=frames,
@@ -543,26 +780,209 @@ class RenderRunner:
                 if ret is not None:
                     break
 
-                if done_seen_at is not None and (time.monotonic() - done_seen_at) > 4.0:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                # Keep-alive warm transition: once agent emits 'done' and writes fresh ready.json, leave proc parked!
+                if keep_warm and last_stage == "done" and ready_json_path and os.path.isfile(ready_json_path):
+                    stayed_warm = True
+                    break
+
+                if done_seen_at is not None and (time.monotonic() - done_seen_at) > (6.0 if keep_warm else 4.0):
+                    _kill_process_tree(proc)
                     break
 
                 if self._cancel_event.is_set():
-                    if done_seen_at is None:
-                        done_seen_at = time.monotonic()
-                    elif (time.monotonic() - done_seen_at) > 5.0:
+                    sentinel = job_cfg.get("cancelSentinelPath") or self._cancel_sentinel_path
+                    if sentinel and not os.path.isfile(sentinel):
                         try:
-                            proc.kill()
+                            with open(sentinel, "w", encoding="utf-8") as f:
+                                f.write("cancel")
                         except Exception:
                             pass
+                    if cancel_seen_at is None:
+                        cancel_seen_at = time.monotonic()
+                    grace = 1.0 if is_preview else 4.0
+                    if (time.monotonic() - cancel_seen_at) > grace:
+                        _kill_process_tree(proc)
+                        last_stage = "cancelled"
                         break
 
-                time.sleep(0.10)
+                time.sleep(0.08)
         finally:
             self._proc = None
+
+        if self._cancel_event.is_set():
+            last_stage = "cancelled"
+            stayed_warm = False
+        return last_stage, last_frames, last_video_sec, last_render_fps, stayed_warm
+
+    def _run_unity_pass(
+        self,
+        adofai_dir: str,
+        adofai_exe: str,
+        agent_dll: str,
+        job_cfg: dict,
+        work_dir: str,
+        start_sec: float,
+        target_fps: int,
+        unity_extra_args: List[str],
+        progress_cb: Optional[Callable[[RenderProgress], None]],
+        is_preview: bool = False,
+        allow_warm: bool = True,
+        log_cb: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[str, int, float, float]:
+        """Run a Unity Doorstop offline pass, reusing an IdleWarm session for the same level when available."""
+        if self._cancel_event.is_set():
+            return "cancelled", 0, 0.0, 0.0
+
+        warm_mgr = get_warm_session_manager()
+        keep_warm = bool(allow_warm and warm_mgr.is_eligible(self.caps))
+        level_path = str(job_cfg.get("levelPath", ""))
+        progress_path = job_cfg["progressPath"]
+
+        # 1) Attempt zero-reload warm session reuse when the exact same level is already loaded in RAM/VRAM
+        claimed = warm_mgr.try_claim(level_path, adofai_dir, agent_dll) if allow_warm else None
+        if claimed is not None:
+            proc, session_dir = claimed
+            ready_path = os.path.join(session_dir, "ready.json")
+            next_job_path = os.path.join(session_dir, "next_job.json")
+            next_job_tmp = next_job_path + ".tmp"
+
+            warm_cfg = dict(job_cfg)
+            warm_cfg["keepAliveAfterFinish"] = keep_warm
+            warm_cfg["sessionDir"] = session_dir
+            warm_cfg["parentPid"] = os.getpid()
+            warm_cfg["idleTimeoutSec"] = 300
+
+            try:
+                job_json_path = os.path.join(work_dir, "job.json")
+                with open(job_json_path, "w", encoding="utf-8") as f:
+                    json.dump(warm_cfg, f, ensure_ascii=False, indent=2)
+                # Remove previous ready.json BEFORE dispatching next_job.json so ready.json can only
+                # reappear after the agent finishes THIS job and re-enters IdleWarm.
+                if os.path.isfile(ready_path):
+                    os.remove(ready_path)
+                with open(next_job_tmp, "w", encoding="utf-8") as f:
+                    json.dump(warm_cfg, f, ensure_ascii=False, indent=2)
+                os.replace(next_job_tmp, next_job_path)
+
+                if log_cb:
+                    log_cb("상주 렌더 세션 재사용: 이미 로딩된 레벨·장식·텍스처로 즉시 렌더링을 시작합니다.")
+                if progress_cb:
+                    progress_cb(RenderProgress(
+                        stage="loading_level",
+                        percent=4.0,
+                        message="상주 엔진 세션 재사용 중 (레벨 · 장식 재로딩 생략)...",
+                    ))
+
+                last_stage, last_frames, last_video_sec, last_render_fps, stayed_warm = self._poll_unity_pass(
+                    proc=proc,
+                    job_cfg=warm_cfg,
+                    start_sec=start_sec,
+                    target_fps=target_fps,
+                    progress_cb=progress_cb,
+                    is_preview=is_preview,
+                    keep_warm=keep_warm,
+                    ready_json_path=ready_path,
+                )
+
+                if stayed_warm:
+                    warm_mgr.release_back_to_idle(proc, session_dir, level_path, adofai_dir, agent_dll)
+                    return last_stage, last_frames, last_video_sec, last_render_fps
+
+                if self._cancel_event.is_set() or last_stage == "cancelled":
+                    warm_mgr.discard_active(proc, session_dir, force_kill=True)
+                    return "cancelled", last_frames, last_video_sec, last_render_fps
+
+                if last_stage == "done":
+                    warm_mgr.discard_active(proc, session_dir, force_kill=False)
+                    return last_stage, last_frames, last_video_sec, last_render_fps
+
+                # Warm restart failed before rendering cleanly -> discard & transparently fall back to cold start!
+                warm_mgr.discard_active(proc, session_dir, force_kill=True)
+                if log_cb:
+                    log_cb(f"상주 세션 재시작 실패(stage={last_stage}) — 일반 엔진 로딩으로 자동 전환합니다.")
+                for fpath in (progress_path, job_cfg.get("videoOutputPath", "")):
+                    if fpath and os.path.isfile(fpath):
+                        try:
+                            os.remove(fpath)
+                        except Exception:
+                            pass
+            except Exception as ex:
+                warm_mgr.discard_active(proc, session_dir, force_kill=True)
+                if log_cb:
+                    log_cb(f"상주 세션 디스패치 오류({ex}) — 일반 엔진 로딩으로 자동 전환합니다.")
+
+        # 2) Cold launch (shut down any unrelated warm session first so 2 Unity instances never coexist)
+        warm_mgr.shutdown(force=False)
+        if self._cancel_event.is_set():
+            return "cancelled", 0, 0.0, 0.0
+
+        session_dir = ""
+        ready_path = ""
+        cold_cfg = dict(job_cfg)
+        if keep_warm:
+            snonce = f"{os.getpid()}_{int(time.time() * 1000) % 1000000}"
+            session_dir = os.path.join(CACHE_ROOT, "jobs", f"warm_session_{snonce}")
+            os.makedirs(session_dir, exist_ok=True)
+            ready_path = os.path.join(session_dir, "ready.json")
+            cold_cfg["keepAliveAfterFinish"] = True
+            cold_cfg["sessionDir"] = session_dir
+            cold_cfg["parentPid"] = os.getpid()
+            cold_cfg["idleTimeoutSec"] = 300
+        else:
+            cold_cfg["keepAliveAfterFinish"] = False
+            cold_cfg["sessionDir"] = ""
+
+        job_json_path = os.path.join(work_dir, "job.json")
+        with open(job_json_path, "w", encoding="utf-8") as f:
+            json.dump(cold_cfg, f, ensure_ascii=False, indent=2)
+
+        env = os.environ.copy()
+        env["ADOFAI_RENDER_JOB"] = job_json_path
+
+        # Offscreen camRT is independent of the host window size; keep dummy window compact (640x360)
+        # to minimize wasted swapchain work while maintaining full 16:9 aspect ratio.
+        win_w = "640"
+        win_h = "360"
+
+        cmd = [
+            adofai_exe,
+            "--doorstop-enabled", "true",
+            "--doorstop-target-assembly", agent_dll,
+            "-popupwindow",
+            "-screen-width", win_w,
+            "-screen-height", win_h,
+            "-screen-fullscreen", "0",
+        ] + unity_extra_args
+
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 4  # SW_SHOWNOACTIVATE: never steal focus from GUI
+
+        if self._cancel_event.is_set():
+            if session_dir:
+                WarmSessionManager._cleanup_dir(session_dir)
+            return "cancelled", 0, 0.0, 0.0
+
+        proc = subprocess.Popen(cmd, cwd=adofai_dir, env=env, startupinfo=startupinfo)
+        last_stage, last_frames, last_video_sec, last_render_fps, stayed_warm = self._poll_unity_pass(
+            proc=proc,
+            job_cfg=cold_cfg,
+            start_sec=start_sec,
+            target_fps=target_fps,
+            progress_cb=progress_cb,
+            is_preview=is_preview,
+            keep_warm=keep_warm,
+            ready_json_path=ready_path,
+        )
+
+        if stayed_warm and proc.poll() is None:
+            warm_mgr.release_back_to_idle(proc, session_dir, level_path, adofai_dir, agent_dll)
+        elif session_dir:
+            if proc.poll() is None:
+                _kill_process_tree(proc)
+            WarmSessionManager._cleanup_dir(session_dir)
 
         return last_stage, last_frames, last_video_sec, last_render_fps
 
@@ -756,6 +1176,8 @@ class RenderRunner:
                 unity_extra_args=unity_flags,
                 progress_cb=emit_prog,
                 is_preview=False,
+                allow_warm=(idx == 0),
+                log_cb=emit_log,
             )
 
             if self._cancel_event.is_set() or last_stage == "cancelled":
@@ -919,8 +1341,9 @@ class RenderRunner:
         proxy_height: int = DEFAULT_PROXY_HEIGHT,
         proxy_fps: int = DEFAULT_PROXY_FPS,
     ) -> PreviewResult:
-        """Pre-render a lightweight proxy MP4 + timeline filmstrip for trim selection (144p..720p, 5..60fps)."""
-        self._cancel_event.clear()
+        """Pre-render a lightweight proxy MP4 + timeline filmstrip for trim selection (240p..720p, 5..60fps)."""
+        if self._cancel_event.is_set():
+            return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
         abs_lvl = os.path.abspath(level_path)
         if not os.path.isfile(abs_lvl):
             return PreviewResult(success=False, error="레벨 파일을 찾을 수 없습니다.")
@@ -946,12 +1369,15 @@ class RenderRunner:
             return PreviewResult(success=False, error="Steam ADOFAI 설치 경로를 찾을 수 없습니다.")
 
         agent_dll = self.ensure_agent_built(adofai_dir, log_cb)
+        if self._cancel_event.is_set():
+            return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
 
         # Keep simulation rate >= 10fps via captureStride=2 for very low proxy FPS (5..9fps) so tile stepping stays accurate
         stride = 2 if out_fps < 10 else 1
         sim_fps = out_fps * stride
 
-        work_dir = os.path.join(CACHE_ROOT, "jobs", f"preview_{h}_{os.getpid()}")
+        nonce = f"{os.getpid()}_{int(time.time() * 1000) % 1000000}"
+        work_dir = os.path.join(CACHE_ROOT, "jobs", f"preview_{h}_{nonce}")
         os.makedirs(work_dir, exist_ok=True)
         video_only = os.path.join(work_dir, "preview_video.mp4")
         timeline_json = os.path.join(work_dir, "preview_timeline.json")
@@ -960,154 +1386,184 @@ class RenderRunner:
         cancel_sentinel = os.path.join(work_dir, "cancel.flag")
         self._cancel_sentinel_path = cancel_sentinel
 
-        enc = "h264_nvenc" if "h264_nvenc" in self.caps.verified_encoders else "libx264"
-        ffmpeg_args = build_ffmpeg_preview_args(pw, ph, out_fps, video_only, encoder=enc)
+        try:
+            enc = "h264_nvenc" if "h264_nvenc" in self.caps.verified_encoders else "libx264"
+            ffmpeg_args = build_ffmpeg_preview_args(pw, ph, out_fps, video_only, encoder=enc)
 
-        job_cfg = {
-            "levelPath": abs_lvl,
-            "videoOutputPath": video_only,
-            "audioTimelinePath": timeline_json,
-            "sfxCacheDir": os.path.join(CACHE_ROOT, "sfx"),
-            "progressPath": progress_path,
-            "logPath": log_path,
-            "cancelSentinelPath": cancel_sentinel,
-            "ffmpegPath": self.caps.ffmpeg_path,
-            "ffmpegArgs": ffmpeg_args,
-            "width": pw,
-            "height": ph,
-            "fps": sim_fps,
-            "startSec": 0.0,
-            "endSec": 0.0,
-            "endPaddingSec": 1.0,
-            "hideCountdown": True,
-            "hideHitText": True,
-            "flipVertical": True,
-            "captureAudioClips": False,
-            "maxGpuUsagePercent": max(30, min(100, int(gpu_limit_percent))),
-            "customPlanetColors": True,
-            "redPlanetColor": red_color,
-            "redPlanetOpacity": float(max(0.0, min(1.0, red_opacity))),
-            "bluePlanetColor": blue_color,
-            "bluePlanetOpacity": float(max(0.0, min(1.0, blue_opacity))),
-            "lowSpecSafeMode": bool(self.caps.low_spec_recommended),
-            "experimentalOptimizeRender": True,
-            "previewMode": True,
-            "captureStride": stride,
-        }
+            job_cfg = {
+                "levelPath": abs_lvl,
+                "videoOutputPath": video_only,
+                "audioTimelinePath": timeline_json,
+                "sfxCacheDir": os.path.join(CACHE_ROOT, "sfx"),
+                "progressPath": progress_path,
+                "logPath": log_path,
+                "cancelSentinelPath": cancel_sentinel,
+                "ffmpegPath": self.caps.ffmpeg_path,
+                "ffmpegArgs": ffmpeg_args,
+                "width": pw,
+                "height": ph,
+                "fps": sim_fps,
+                "startSec": 0.0,
+                "endSec": 0.0,
+                "endPaddingSec": 1.0,
+                "hideCountdown": True,
+                "hideHitText": True,
+                "flipVertical": True,
+                "captureAudioClips": False,
+                "maxGpuUsagePercent": max(30, min(100, int(gpu_limit_percent))),
+                "customPlanetColors": True,
+                "redPlanetColor": red_color,
+                "redPlanetOpacity": float(max(0.0, min(1.0, red_opacity))),
+                "bluePlanetColor": blue_color,
+                "bluePlanetOpacity": float(max(0.0, min(1.0, blue_opacity))),
+                "lowSpecSafeMode": bool(self.caps.low_spec_recommended),
+                "experimentalOptimizeRender": True,
+                "previewMode": True,
+                "captureStride": stride,
+            }
 
-        seen = {"est": 0.0}
-        user_cb = progress_cb
+            seen = {"est": 0.0}
+            user_cb = progress_cb
 
-        def progress_cb(p: RenderProgress) -> None:  # noqa: F811 - wrapper that records expected length
-            try:
-                if p.est_total_sec and p.est_total_sec > seen["est"]:
-                    seen["est"] = float(p.est_total_sec)
-            except Exception:
-                pass
-            if user_cb:
-                user_cb(p)
+            def wrapped_progress_cb(p: RenderProgress) -> None:
+                try:
+                    if p.est_total_sec and p.est_total_sec > seen["est"]:
+                        seen["est"] = float(p.est_total_sec)
+                except Exception:
+                    pass
+                if user_cb and not self._cancel_event.is_set():
+                    user_cb(p)
 
-        if log_cb:
-            log_cb(f"프록시 생성 중 ({pw}x{ph} · {out_fps}fps Proxy)...")
-        if progress_cb:
-            progress_cb(RenderProgress(stage="launching", message=f"프록시 렌더 시작 중 ({pw}×{ph} · {out_fps}fps)..."))
+            if log_cb:
+                log_cb(f"프록시 생성 중 ({pw}x{ph} · {out_fps}fps Proxy)...")
+            wrapped_progress_cb(RenderProgress(stage="launching", message=f"프록시 렌더 시작 중 ({pw}×{ph} · {out_fps}fps)..."))
 
-        stage, _frames, vsec, _rfps = self._run_unity_pass(
-            adofai_dir=adofai_dir,
-            adofai_exe=adofai_exe,
-            agent_dll=agent_dll,
-            job_cfg=job_cfg,
-            work_dir=work_dir,
-            start_sec=0.0,
-            target_fps=sim_fps,
-            unity_extra_args=["-force-d3d11"],
-            progress_cb=progress_cb,
-            is_preview=True,
-        )
-
-        if self._cancel_event.is_set() or stage == "cancelled":
-            return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
-
-        # Safe CPU fallback retry if HW preview encoder failed
-        if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
-            if enc != "libx264":
-                job_cfg["ffmpegArgs"] = build_ffmpeg_preview_args(pw, ph, out_fps, video_only, encoder="libx264")
-                job_cfg["lowSpecSafeMode"] = True
-                for fpath in (progress_path, video_only):
-                    try:
-                        if os.path.isfile(fpath):
-                            os.remove(fpath)
-                    except Exception:
-                        pass
-                stage, _frames, vsec, _rfps = self._run_unity_pass(
-                    adofai_dir=adofai_dir,
-                    adofai_exe=adofai_exe,
-                    agent_dll=agent_dll,
-                    job_cfg=job_cfg,
-                    work_dir=work_dir,
-                    start_sec=0.0,
-                    target_fps=sim_fps,
-                    unity_extra_args=[],
-                    progress_cb=progress_cb,
-                    is_preview=True,
-                )
-
-        if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
-            return PreviewResult(success=False, error=f"프록시 영상 생성 실패 (stage={stage})")
-
-        # Reject truncated proxies (interrupted run): must cover (almost) the whole level
-        if seen["est"] > 5.0 and vsec > 0 and vsec < seen["est"] - 3.0:
-            return PreviewResult(
-                success=False,
-                error=f"프록시 생성이 중간에 중단되었습니다 ({vsec:.0f}s / {seen['est']:.0f}s). 다시 생성해 주세요.",
+            stage, _frames, vsec, _rfps = self._run_unity_pass(
+                adofai_dir=adofai_dir,
+                adofai_exe=adofai_exe,
+                agent_dll=agent_dll,
+                job_cfg=job_cfg,
+                work_dir=work_dir,
+                start_sec=0.0,
+                target_fps=sim_fps,
+                unity_extra_args=["-force-d3d11"],
+                progress_cb=wrapped_progress_cb,
+                is_preview=True,
+                allow_warm=True,
+                log_cb=log_cb,
             )
 
-        # Mux BGM-only audio cleanly onto rough preview so scrubbing/playback matches song timing
-        _fix_timeline_output_fps(timeline_json, float(out_fps))
-        mixed_wav = os.path.join(work_dir, "preview_bgm.wav")
-        muxed = False
-        if os.path.isfile(timeline_json):
-            try:
-                has_bgm = mix_audio_from_timeline(
-                    timeline_json_path=timeline_json,
-                    output_wav_path=mixed_wav,
-                    ffmpeg_path=self.caps.ffmpeg_path,
-                    options=AudioMixOptions(include_bgm=True, include_hitsounds=False, include_sfx=False),
-                )
-                if has_bgm and os.path.isfile(mixed_wav):
-                    r = subprocess.run(
-                        [
-                            self.caps.ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
-                            "-i", video_only, "-i", mixed_wav,
-                            "-map", "0:v:0", "-map", "1:a:0",
-                            "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
-                            "-shortest", "-movflags", "+faststart",
-                            out_mp4,
-                        ],
-                        capture_output=True,
-                        timeout=60,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            if self._cancel_event.is_set() or stage == "cancelled":
+                return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
+
+            # Safe CPU fallback retry if HW preview encoder failed
+            if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
+                if enc != "libx264":
+                    job_cfg["ffmpegArgs"] = build_ffmpeg_preview_args(pw, ph, out_fps, video_only, encoder="libx264")
+                    job_cfg["lowSpecSafeMode"] = True
+                    for fpath in (progress_path, video_only):
+                        try:
+                            if os.path.isfile(fpath):
+                                os.remove(fpath)
+                        except Exception:
+                            pass
+                    stage, _frames, vsec, _rfps = self._run_unity_pass(
+                        adofai_dir=adofai_dir,
+                        adofai_exe=adofai_exe,
+                        agent_dll=agent_dll,
+                        job_cfg=job_cfg,
+                        work_dir=work_dir,
+                        start_sec=0.0,
+                        target_fps=sim_fps,
+                        unity_extra_args=[],
+                        progress_cb=wrapped_progress_cb,
+                        is_preview=True,
+                        allow_warm=False,
+                        log_cb=log_cb,
                     )
-                    muxed = (r.returncode == 0 and os.path.isfile(out_mp4))
+
+            if self._cancel_event.is_set() or stage == "cancelled":
+                return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
+
+            if stage != "done" or not os.path.isfile(video_only) or os.path.getsize(video_only) < 1024:
+                return PreviewResult(success=False, error=f"프록시 영상 생성 실패 (stage={stage})")
+
+            # Reject truncated proxies (interrupted run): must cover (almost) the whole level
+            if seen["est"] > 5.0 and vsec > 0 and vsec < seen["est"] - 3.0:
+                return PreviewResult(
+                    success=False,
+                    error=f"프록시 생성이 중간에 중단되었습니다 ({vsec:.0f}s / {seen['est']:.0f}s). 다시 생성해 주세요.",
+                )
+
+            # Mux BGM-only audio cleanly onto rough preview so scrubbing/playback matches song timing
+            _fix_timeline_output_fps(timeline_json, float(out_fps))
+            mixed_wav = os.path.join(work_dir, "preview_bgm.wav")
+            muxed = False
+            if os.path.isfile(timeline_json) and not self._cancel_event.is_set():
+                try:
+                    has_bgm = mix_audio_from_timeline(
+                        timeline_json_path=timeline_json,
+                        output_wav_path=mixed_wav,
+                        ffmpeg_path=self.caps.ffmpeg_path,
+                        options=AudioMixOptions(include_bgm=True, include_hitsounds=False, include_sfx=False),
+                    )
+                    if has_bgm and os.path.isfile(mixed_wav) and not self._cancel_event.is_set():
+                        os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
+                        r = subprocess.run(
+                            [
+                                self.caps.ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", video_only, "-i", mixed_wav,
+                                "-map", "0:v:0", "-map", "1:a:0",
+                                "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
+                                "-shortest", "-movflags", "+faststart",
+                                out_mp4,
+                            ],
+                            capture_output=True,
+                            timeout=60,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                        muxed = (r.returncode == 0 and os.path.isfile(out_mp4))
+                except Exception:
+                    pass
+
+            if self._cancel_event.is_set():
+                for pth in (out_mp4, strip_jpg, ok_marker):
+                    try:
+                        if os.path.isfile(pth):
+                            os.remove(pth)
+                    except Exception:
+                        pass
+                return PreviewResult(success=False, error="프록시 생성이 취소되었습니다.")
+
+            if not muxed:
+                os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
+                shutil.copy2(video_only, out_mp4)
+
+            dur = self._probe_duration(out_mp4) or vsec
+            self._build_filmstrip(out_mp4, strip_jpg, dur)
+            try:
+                with open(ok_marker, "w", encoding="utf-8") as mf:
+                    mf.write(f"{dur:.3f}")
             except Exception:
                 pass
-        if not muxed:
-            shutil.copy2(video_only, out_mp4)
 
-        dur = self._probe_duration(out_mp4) or vsec
-        self._build_filmstrip(out_mp4, strip_jpg, dur)
-        try:
-            with open(ok_marker, "w", encoding="utf-8") as mf:
-                mf.write(f"{dur:.3f}")
-        except Exception:
-            pass
+            if log_cb and os.path.isfile(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8-sig", errors="replace") as lf:
+                        for line in lf:
+                            if "Proxy heavy-filter bypass:" in line:
+                                log_cb(line.strip())
+                                break
+                except Exception:
+                    pass
 
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-        return PreviewResult(success=True, video_path=out_mp4, filmstrip_path=strip_jpg, duration_sec=dur, cached=False)
+            return PreviewResult(success=True, video_path=out_mp4, filmstrip_path=strip_jpg, duration_sec=dur, cached=False)
+        finally:
+            self._cancel_sentinel_path = None
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def _probe_duration(self, path: str) -> float:
         try:

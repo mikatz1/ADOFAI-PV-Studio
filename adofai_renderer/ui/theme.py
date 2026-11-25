@@ -15,7 +15,8 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 from ..paths import get_data_root
 
 SUPPORTED_THEMES = ("dark", "pastel_light")
-_REG_SUBKEY = r"Software\ADOFAI PV Renderer"
+_REG_SUBKEY = r"Software\ADOFAI PV Studio"
+_LEGACY_REG_SUBKEY = r"Software\ADOFAI PV Renderer"
 _REG_THEME_VALUE = "Theme"
 _current_theme: str | None = None
 
@@ -408,9 +409,16 @@ def _read_registry_theme() -> str:
     try:
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_SUBKEY) as k:
-            val, _ = winreg.QueryValueEx(k, _REG_THEME_VALUE)
-        return _normalize_theme(str(val or ""))
+        for subkey in (_REG_SUBKEY, _LEGACY_REG_SUBKEY):
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as k:
+                    val, _ = winreg.QueryValueEx(k, _REG_THEME_VALUE)
+                norm = _normalize_theme(str(val or ""))
+                if norm:
+                    return norm
+            except Exception:
+                continue
+        return ""
     except Exception:
         return ""
 

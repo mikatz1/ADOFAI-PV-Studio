@@ -16,7 +16,8 @@ LANGUAGE_NAMES = {
     "ja": "日本語",
 }
 
-_REG_SUBKEY = r"Software\ADOFAI PV Renderer"
+_REG_SUBKEY = r"Software\ADOFAI PV Studio"
+_LEGACY_REG_SUBKEY = r"Software\ADOFAI PV Renderer"
 _REG_VALUE = "Language"
 _current_lang: str | None = None
 
@@ -38,9 +39,16 @@ def _read_registry_lang() -> str:
     try:
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_SUBKEY) as k:
-            val, _ = winreg.QueryValueEx(k, _REG_VALUE)
-        return _normalize_lang(str(val or ""))
+        for subkey in (_REG_SUBKEY, _LEGACY_REG_SUBKEY):
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as k:
+                    val, _ = winreg.QueryValueEx(k, _REG_VALUE)
+                norm = _normalize_lang(str(val or ""))
+                if norm:
+                    return norm
+            except Exception:
+                continue
+        return ""
     except Exception:
         return ""
 
@@ -194,9 +202,9 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "ja": "Unityエンジンバイナリのプリウォーム",
     },
     "welcome.step5": {
-        "ko": "워크스페이스 및 샘플 메타데이터 분석",
-        "en": "Analyze workspace & sample metadata",
-        "ja": "ワークスペース・サンプルメタデータ解析",
+        "ko": "워크스페이스 및 출력 경로 초기화",
+        "en": "Initialize workspace & output path",
+        "ja": "ワークスペース・出力先の初期化",
     },
     "preload.s1_title": {
         "ko": "엔진 경로 확인",
@@ -244,9 +252,9 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "ja": "ワークスペース初期化",
     },
     "preload.s5_detail": {
-        "ko": "로컬 샘플 레벨 메타데이터 및 타임라인 길이 분석 중...",
-        "en": "Scanning local sample levels and timeline durations...",
-        "ja": "サンプルレベルのメタデータと長さを解析中...",
+        "ko": "작업 폴더 및 프록시 캐시 환경 준비 중...",
+        "en": "Preparing workspace and proxy cache directories...",
+        "ja": "作業フォルダとプロキシキャッシュ環境を準備中...",
     },
     "preload.done_title": {
         "ko": "준비 완료",
@@ -266,8 +274,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "en": "Open Level...",
         "ja": "レベルを開く...",
     },
-    "menu.samples": {"ko": "샘플 레벨", "en": "Sample Levels", "ja": "サンプルレベル"},
-    "menu.samples_empty": {"ko": "(샘플 없음)", "en": "(No samples)", "ja": "(サンプルなし)"},
     "menu.steam_dir": {
         "ko": "Steam ADOFAI 경로 설정...",
         "en": "Set Steam ADOFAI Folder...",
@@ -355,7 +361,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "menu.help": {"ko": "도움말(&H)", "en": "&Help", "ja": "ヘルプ(&H)"},
     "menu.diag": {"ko": "하드웨어 및 인코더 진단", "en": "Hardware & Encoder Diagnostics", "ja": "ハードウェア・エンコーダー診断"},
     "menu.check_upd": {"ko": "업데이트 확인...", "en": "Check for Updates...", "ja": "アップデートを確認..."},
-    "menu.about": {"ko": "프로그램 정보", "en": "About ADOFAI PV Renderer", "ja": "バージョン情報"},
+    "menu.about": {"ko": "프로그램 정보", "en": "About ADOFAI PV Studio", "ja": "バージョン情報"},
 
     # ---------------- Viewport & Panes ----------------
     "vp.header": {"ko": "뷰어", "en": "Viewer", "ja": "ビューアー"},
@@ -395,6 +401,16 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "ko": "프록시 렌더 엔진 준비 중...",
         "en": "Preparing proxy render engine...",
         "ja": "プロキシレンダーエンジンを準備中...",
+    },
+    "vp.gen_restarting": {
+        "ko": "이전 프록시 작업 정리 후 새 설정({w}×{h} · {fps}fps)으로 다시 시작하는 중...",
+        "en": "Stopping previous proxy job and restarting with {w}×{h} · {fps}fps...",
+        "ja": "前のプロキシ処理を停止し、新しい設定({w}×{h} · {fps}fps)で再開中...",
+    },
+    "vp.gen_cancelling": {
+        "ko": "진행 중인 프록시 작업을 정리하는 중...",
+        "en": "Stopping active proxy job...",
+        "ja": "実行中のプロキシ処理を停止しています...",
     },
     "vp.level_detail": {
         "ko": "BPM {bpm:g}, 타일 {tiles:,}, 장식 {decos:,}, 필터 {filts}종",
@@ -508,6 +524,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "sb.no_level": {"ko": "  레벨 없음  ", "en": "  No Level  ", "ja": "  レベルなし  "},
     "sb.preview_loaded": {"ko": "프록시가 로드되었습니다.", "en": "Proxy loaded.", "ja": "プロキシを読み込みました。"},
     "sb.proxy_updated": {"ko": "프록시 설정이 적용되었습니다 ({w}×{h} · {fps}fps).", "en": "Proxy settings updated ({w}×{h} · {fps}fps).", "ja": "プロキシ設定を適用しました ({w}×{h} · {fps}fps)。"},
+    "sb.proxy_restarting": {"ko": "프록시 설정 변경으로 새 설정({w}×{h} · {fps}fps)으로 다시 생성합니다...", "en": "Proxy settings changed — restarting at {w}×{h} · {fps}fps...", "ja": "プロキシ設定を変更しました — {w}×{h} · {fps}fpsで再生成します..."},
     "sb.render_done": {"ko": "렌더링 완료: {path}", "en": "Render complete: {path}", "ja": "レンダリング完了: {path}"},
     "sb.checking_upd": {"ko": "업데이트를 확인하는 중...", "en": "Checking for updates...", "ja": "アップデートを確認中..."},
 
@@ -548,9 +565,9 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "ja": "Steam ADOFAI: {adofai}\nFFmpeg: {ffmpeg}\n検出されたGPU:\n{gpus}\n検証済みエンコーダー: {encs}\n推奨バックエンド: {rec}",
     },
     "dlg.about_body": {
-        "ko": "ADOFAI PV Renderer v{ver}\n\n결정론적 오프라인 렌더링 및 실제 인게임 셰이더·필터·히트사운드 합성 도구.",
-        "en": "ADOFAI PV Renderer v{ver}\n\nDeterministic offline PV renderer with authentic in-game shaders, filters, and hitsound mixing.",
-        "ja": "ADOFAI PV Renderer v{ver}\n\nゲーム本来のシェーダー・フィルター・ヒット音合成に対応した決定論的オフラインPVレンダラー。",
+        "ko": "ADOFAI PV Studio v{ver}\n\n결정론적 오프라인 렌더링 및 실제 인게임 셰이더·필터·히트사운드 합성 스튜디오.",
+        "en": "ADOFAI PV Studio v{ver}\n\nDeterministic offline PV studio with authentic in-game shaders, filters, and hitsound mixing.",
+        "ja": "ADOFAI PV Studio v{ver}\n\nゲーム本来のシェーダー・フィルター・ヒット音合成に対応した決定論的オフラインPVスタジオ。",
     },
 
     # Updates
@@ -641,14 +658,14 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "ja": "5〜60 fpsの範囲でプロキシのフレームレートを設定できます。",
     },
     "proxy.quick": {"ko": "빠른 프리셋:", "en": "Quick Presets:", "ja": "クイックプリセット:"},
-    "proxy.preset_ultra_fast": {"ko": "초고속 (144p · 5fps)", "en": "Ultra Fast (144p · 5fps)", "ja": "超高速 (144p · 5fps)"},
+    "proxy.preset_ultra_fast": {"ko": "초고속 (240p · 5fps)", "en": "Ultra Fast (240p · 5fps)", "ja": "超高速 (240p · 5fps)"},
     "proxy.preset_std": {"ko": "표준 (270p · 12fps)", "en": "Standard (270p · 12fps)", "ja": "標準 (270p · 12fps)"},
     "proxy.preset_smooth": {"ko": "부드러움 (480p · 30fps)", "en": "Smooth (480p · 30fps)", "ja": "滑らか (480p · 30fps)"},
     "proxy.preset_hd": {"ko": "고화질 (720p · 60fps)", "en": "HD (720p · 60fps)", "ja": "高画質 (720p · 60fps)"},
     "proxy.note": {
-        "ko": "해상도(144p~720p)와 프레임(5~60fps)이 낮을수록 프록시 생성이 빨라지며, 최종 렌더링 화질에는 영향을 주지 않습니다.",
-        "en": "Lower resolution (144p–720p) and frame rate (5–60 fps) build proxies faster and never affect final render quality.",
-        "ja": "解像度(144p〜720p)やフレーム(5〜60fps)を下げるとプロキシ生成が高速になります。最終レンダリング画質には影響しません。",
+        "ko": "해상도(240p~720p)와 프레임(5~60fps)이 낮을수록 생성이 빨라지며, 프록시 생성 시에는 블룸·블러·오일페인트 등 고부하 필터를 자동 생략합니다(최종 렌더링 화질에는 영향 없음).",
+        "en": "Lower resolution (240p–720p) and frame rate (5–60 fps) build proxies faster. Heavy post-FX (Bloom, Blur, OilPaint, MotionBlur) are bypassed during proxy generation without affecting final renders.",
+        "ja": "解像度(240p〜720p)やフレーム(5〜60fps)を下げるほど高速になります。プロキシ生成時はBloom・Blur・OilPaint等の高負荷フィルターを自動省略します(最終レンダリング画質には影響しません)。",
     },
 
     # Export / Preferences Dialog

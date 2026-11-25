@@ -1,9 +1,9 @@
-﻿ADOFAI PV Renderer 이용약관
+﻿ADOFAI PV Studio 이용약관
 
-최종 수정: 2026-11-24
+최종 수정: 2026-11-25
 
 제1조 (목적)
-본 약관은 ADOFAI PV Renderer(이하 "본 프로그램")의 설치 및 사용 조건을 정합니다.
+본 약관은 ADOFAI PV Studio(이하 "본 프로그램")의 설치 및 사용 조건을 정합니다.
 
 제2조 (프로그램의 성격)
 본 프로그램은 팬이 만든 비공식 도구이며, 'A Dance of Fire and Ice' 및 그 개발사와 어떠한 제휴·후원·승인 관계도 없습니다. 'A Dance of Fire and Ice'의 모든 권리는 해당 권리자에게 있습니다.

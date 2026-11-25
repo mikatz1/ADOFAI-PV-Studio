@@ -56,6 +56,19 @@ namespace AdofaiRenderAgent
         {
             SfxCacheDir = sfxCacheDir;
             CaptureEnabled = captureEnabled;
+            CaptureStartDsp = 0.0;
+            CaptureEndDsp = 0.0;
+            LevelStartDsp = 0.0;
+            SongStartDsp = 0.0;
+            DspTimeSong = 0.0;
+            AddOffset = 0.0;
+            SongPitch = 1.0f;
+            SongVolume = 1.0f;
+            Bpm = 100f;
+            SongFilePath = "";
+            TotalCapturedFrames = 0;
+            HasSongSchedule = false;
+            PlayHitTimesCaptured = false;
             lock (_lock)
             {
                 _events.Clear();

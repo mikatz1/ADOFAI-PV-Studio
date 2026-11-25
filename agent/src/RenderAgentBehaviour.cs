@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.Video;
@@ -23,13 +26,21 @@ namespace AdofaiRenderAgent
             SimulatingToStart,
             Capturing,
             Finishing,
-            Done
+            Done,
+            IdleWarm
         }
 
         public static RenderJobConfig Config;
         private Stage _stage = Stage.Boot;
         private int _stageFrames = 0;
         private int _settledFrames = 0;
+        private bool _isWarmReuse = false;
+        private string _warmSessionDir = "";
+        private string _warmLoadedLevelPath = "";
+        private int _warmParentPid = 0;
+        private int _warmIdleTimeoutSec = 300;
+        private Stopwatch _idleWatch = null;
+        private double _lastParentCheckSec = 0.0;
         private FrameCapturePipe _pipe;
         private Stopwatch _renderWallClock;
         private readonly GpuPacer _gpuPacer = new GpuPacer();
@@ -37,6 +48,7 @@ namespace AdofaiRenderAgent
 
         private double _levelStartDsp = 0.0;
         private int _fastStartFloor = -1;
+        private bool _checkpointRestartIssued = false;
         private double _captureStartDsp = 0.0;
         private double _wonElapsedSec = 0.0;
         private double _estimatedTotalSec = 0.0;
@@ -49,8 +61,12 @@ namespace AdofaiRenderAgent
 
         private static readonly FieldInfo _fiWaitForStartCallCount =
             typeof(scrController).GetField("waitForStartCoCallCount", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo _fiTransitioningLevel =
+            typeof(scrController).GetField("transitioningLevel", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo _fiPlayedHitSounds =
             typeof(scrConductor).GetField("playedHitSounds", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo _fiConductorBuffer =
+            typeof(scrConductor).GetField("buffer", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
         private bool _windowHiddenOffscreen = false;
 
@@ -151,6 +167,11 @@ namespace AdofaiRenderAgent
         private void Update()
         {
             if (_stage == Stage.Done || _stage == Stage.Finishing) return;
+            if (_stage == Stage.IdleWarm)
+            {
+                UpdateIdleWarm();
+                return;
+            }
 
             // Keep live speakers 100% silent and keep running in background
             MuteAllLocalAudio();
@@ -195,14 +216,17 @@ namespace AdofaiRenderAgent
         {
             if (_stage >= Stage.WaitingForLevelLoad && _stage <= Stage.Capturing)
             {
-                UiAndQualityPatches.SuppressAllOutOfLevelUI();
-                SyncVideoBackgroundIfPresent();
+                bool fastSkip = UiAndQualityPatches.FastSeekSkipRender && _stage == Stage.SimulatingToStart;
+                if (!fastSkip || (_stageFrames % 60 == 0))
+                    UiAndQualityPatches.SuppressAllOutOfLevelUI();
+                if (!fastSkip)
+                    SyncVideoBackgroundIfPresent();
                 if (UiAndQualityPatches.FastSeekSkipRender && scrCamera.instance != null)
                 {
                     UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, true);
                 }
                 if (Config != null && Config.previewMode)
-                    DisableMotionBlurForPreview();
+                    DisableHeavyFiltersForPreview();
                 if (_stage == Stage.Capturing && PlanetTailArc.Enabled)
                 {
                     try { PlanetTailArc.Tick(VirtualClock.Dt); }
@@ -211,20 +235,82 @@ namespace AdofaiRenderAgent
             }
         }
 
-        private UnityStandardAssets.ImageEffects.CameraMotionBlur[] _motionBlurs = new UnityStandardAssets.ImageEffects.CameraMotionBlur[0];
-        private int _motionBlurScan = 0;
+        private readonly List<MonoBehaviour> _previewCamComps = new List<MonoBehaviour>(64);
+        private readonly Dictionary<Type, bool> _heavyFilterTypeCache = new Dictionary<Type, bool>(32);
+        private readonly HashSet<string> _previewSuppressedFilters = new HashSet<string>(StringComparer.Ordinal);
+        private int _previewSuppressedHits = 0;
 
-        // Rough preview only: the level's MotionBlur filter smears the thumbnail frames, so keep it switched off.
-        private void DisableMotionBlurForPreview()
+        private static bool IsHeavyProxyFilterName(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName)) return false;
+            if (typeName == "CameraMotionBlur" || typeName == "MotionBlur" ||
+                typeName == "Blur" || typeName == "BlurOptimized" ||
+                typeName == "DepthOfFieldDeprecated" || typeName == "ScreenSpaceAmbientOcclusion")
+                return true;
+            if (typeName == "VideoBloom" || typeName == "Bloom" || typeName == "BloomOptimized" ||
+                typeName == "BloomAndFlares" || typeName == "MarvelousBloom")
+                return true;
+            if (typeName.IndexOf("OilPaint", StringComparison.Ordinal) >= 0) return true;
+
+            // Match both CameraFilterPack_* and CameraFilterPackLegacy_* families
+            string sub = null;
+            if (typeName.StartsWith("CameraFilterPackLegacy_", StringComparison.Ordinal))
+                sub = typeName.Substring("CameraFilterPackLegacy_".Length);
+            else if (typeName.StartsWith("CameraFilterPack_", StringComparison.Ordinal))
+                sub = typeName.Substring("CameraFilterPack_".Length);
+
+            if (sub != null)
+            {
+                if (sub.StartsWith("Blur_", StringComparison.Ordinal)) return true;
+                if (sub.StartsWith("Glow_", StringComparison.Ordinal)) return true;
+                if (sub.StartsWith("Atmosphere_Rain", StringComparison.Ordinal) ||
+                    sub.StartsWith("Atmosphere_Snow", StringComparison.Ordinal) ||
+                    sub.StartsWith("Rain_", StringComparison.Ordinal) ||
+                    sub.StartsWith("3D_Snow", StringComparison.Ordinal) ||
+                    sub.StartsWith("AAA_WaterDrop", StringComparison.Ordinal) ||
+                    sub == "Blizzard")
+                    return true;
+            }
+            return false;
+        }
+
+        private bool IsHeavyProxyFilter(Type t)
+        {
+            bool res;
+            if (_heavyFilterTypeCache.TryGetValue(t, out res)) return res;
+            res = IsHeavyProxyFilterName(t.Name);
+            _heavyFilterTypeCache[t] = res;
+            return res;
+        }
+
+        // Proxy mode only: suppress the heaviest multi-pass / high-tap post-FX filters
+        // (Bloom, Gaussian/Radial/Focus Blur, Glow, OilPaint, MotionBlur, Rain/Snow/Blizzard/WaterDrop)
+        // across both CameraFilterPack_* and CameraFilterPackLegacy_* families so proxy generation
+        // stays fast without ever affecting final renders.
+        private void DisableHeavyFiltersForPreview()
         {
             try
             {
-                if ((_motionBlurScan++ % 30) == 0)
-                    _motionBlurs = UnityEngine.Object.FindObjectsOfType<UnityStandardAssets.ImageEffects.CameraMotionBlur>();
-                for (int i = 0; i < _motionBlurs.Length; i++)
+                Camera[] cams = Camera.allCameras;
+                if (cams == null) return;
+                for (int c = 0; c < cams.Length; c++)
                 {
-                    UnityStandardAssets.ImageEffects.CameraMotionBlur mb = _motionBlurs[i];
-                    if (mb != null && mb.enabled) mb.enabled = false;
+                    Camera cam = cams[c];
+                    if (cam == null) continue;
+                    _previewCamComps.Clear();
+                    cam.GetComponents<MonoBehaviour>(_previewCamComps);
+                    for (int i = 0; i < _previewCamComps.Count; i++)
+                    {
+                        MonoBehaviour mb = _previewCamComps[i];
+                        if (mb == null || !mb.enabled) continue;
+                        Type t = mb.GetType();
+                        if (IsHeavyProxyFilter(t))
+                        {
+                            mb.enabled = false;
+                            _previewSuppressedHits++;
+                            _previewSuppressedFilters.Add(t.Name);
+                        }
+                    }
                 }
             }
             catch { }
@@ -323,8 +409,56 @@ namespace AdofaiRenderAgent
 
             _settledFrames++;
             // Allow WaitForStartCo's 2-frame shader warmup & asset settling
-            int neededSettle = Config.previewMode ? 5 : 12;
+            int neededSettle = (Config.previewMode || _isWarmReuse || _checkpointRestartIssued) ? 5 : 12;
             if (_settledFrames < neededSettle) return;
+
+            // Cold launch fastStart checkpoint jump: once the level & floor entry times are loaded,
+            // restart cleanly into ADOFAI's official checkpoint path (GCS.checkpointNum = ck,
+            // ResetScene(true), Play(ck, true)) so WaitForStartCo runs PrepVfx, ScrubToFloorNumber(ck),
+            // and scrVfxPlus.ScrubToTime() ONCE with exact seqID=ck and remakeFloors=true.
+            if (!_checkpointRestartIssued)
+            {
+                int ck = ComputeFastStartFloor();
+                if (ck > 0 && GCS.checkpointNum != ck)
+                {
+                    _checkpointRestartIssued = true;
+                    _fastStartFloor = ck;
+                    _settledFrames = 0;
+                    GCS.checkpointNum = ck;
+                    AgentLog.Info(string.Format(CultureInfo.InvariantCulture,
+                        "Fast start official checkpoint scrub: GCS.checkpointNum={0} (entryTime={1:F3}s, target startSec={2:F2}s)",
+                        ck, lm.listFloors[ck].entryTime, Config.startSec));
+
+                    try { if (scrController.instance != null) scrController.instance.StopCoroutine("WaitForStartCo"); } catch { }
+                    if (_fiWaitForStartCallCount != null && scrController.instance != null)
+                        _fiWaitForStartCallCount.SetValue(scrController.instance, 0);
+                    if (_fiPlayedHitSounds != null && scrConductor.instance != null)
+                        _fiPlayedHitSounds.SetValue(scrConductor.instance, false);
+                    if (scrUIController.instance != null)
+                    {
+                        try { scrUIController.instance.HideEndscreenLanterns(); } catch { }
+                    }
+                    ResetCameraFilterTimeAccumulators();
+                    scnGame.instance.ResetScene(true);
+                    scnGame.instance.Play(ck, true);
+                    try { if (_fiTransitioningLevel != null && scrController.instance != null) _fiTransitioningLevel.SetValue(scrController.instance, false); } catch { }
+                    try { if (ADOBase.playerManager != null) ADOBase.playerManager.SetAllPlayerResponsive(true); } catch { }
+                    if (scrCamera.instance != null)
+                    {
+                        scrCamera.instance.forceRTCam = true;
+                        UiAndQualityPatches.EnforceCamRT(scrCamera.instance);
+                    }
+                    UiAndQualityPatches.ReapplyPlanetColors();
+                    UiAndQualityPatches.SuppressAllOutOfLevelUI();
+                    return;
+                }
+                _checkpointRestartIssued = true;
+            }
+
+            if (_isWarmReuse || _fastStartFloor > 0)
+            {
+                UiAndQualityPatches.ReapplyPlanetColors();
+            }
 
             _totalFloors = lm.listFloors.Count;
             try
@@ -362,6 +496,49 @@ namespace AdofaiRenderAgent
             TransitionTo(Stage.StartingPlayback);
         }
 
+        private int ComputeFastStartFloor()
+        {
+            try
+            {
+                if (Config == null || scrLevelMaker.instance == null || scrLevelMaker.instance.listFloors == null)
+                    return -1;
+                var lf = scrLevelMaker.instance.listFloors;
+                if (lf.Count <= 2) return -1;
+
+                int ck = Config.startFloor;
+                if (ck < 0 && Config.fastStart && Config.startSec > 12.0f)
+                {
+                    scrConductor cd = scrConductor.instance;
+                    double addoff = (cd != null) ? Math.Max(0.0, cd.addoffset) : 0.0;
+                    double target = (double)Config.startSec - addoff - 5.0;
+                    if (target >= 4.0)
+                    {
+                        for (int i = 1; i < lf.Count; i++)
+                        {
+                            scrFloor fl = lf[i];
+                            if (fl == null) continue;
+                            double et = fl.entryTimeAfterExtraBeats;
+                            if (et <= 0.0) et = fl.entryTime;
+                            if (et <= target) ck = i;
+                            else break;
+                        }
+                        // Avoid landing checkpoint on midspin, freeroam, or hold tiles (mirrors scrController.Scrub safety)
+                        while (ck > 1 && lf[ck] != null && (lf[ck].midSpin || lf[ck].freeroam || lf[ck].holdLength > 0))
+                        {
+                            ck--;
+                        }
+                    }
+                    if (ck < 1) ck = -1;
+                }
+                if (ck > 0 && ck < lf.Count) return ck;
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Warn("ComputeFastStartFloor warning: " + ex.Message);
+            }
+            return -1;
+        }
+
         private void UpdateStartingPlayback()
         {
             // Engage deterministic virtual clock BEFORE triggering start!
@@ -372,32 +549,8 @@ namespace AdofaiRenderAgent
             VirtualClock.SyncConductor(scrConductor.instance);
 
             AudioTimelineExporter.Fps = Config.fps;
-            _fastStartFloor = -1;
-            try
-            {
-                int ck = Config.startFloor;
-                if (ck < 0 && Config.fastStart && Config.startSec > 12.0f)
-                {
-                    // Elapsed (trim) time = songposition + C with C ~= addoffset - ~0.6s. Pick a floor that is at least
-                    // 5s of song time before startSec even for C = addoffset, then simulate/pre-roll the rest normally.
-                    scrConductor cd = scrConductor.instance;
-                    double addoff = (cd != null) ? Math.Max(0.0, cd.addoffset) : 0.0;
-                    double target = (double)Config.startSec - addoff - 5.0;
-                    var lf = scrLevelMaker.instance.listFloors;
-                    for (int i = 1; i < lf.Count; i++)
-                    {
-                        if (lf[i] != null && lf[i].entryTime <= target) ck = i; else if (lf[i] != null && lf[i].entryTime > target) break;
-                    }
-                    if (ck < 1) ck = -1;
-                }
-                if (ck > 0)
-                {
-                    GCS.checkpointNum = ck;
-                    _fastStartFloor = ck;
-                    AgentLog.Info("Fast start: GCS.checkpointNum=" + GCS.checkpointNum + " (skipping simulation of the level before this floor)");
-                }
-            }
-            catch (Exception ex) { AgentLog.Warn("Fast start unavailable, simulating from the beginning: " + ex.Message); _fastStartFloor = -1; }
+            if (_fastStartFloor < 0 && GCS.checkpointNum > 0)
+                _fastStartFloor = GCS.checkpointNum;
             UiAndQualityPatches.ShouldTriggerStart = true;
 
             AgentLog.Info("Triggered WaitForStartCo start input under VirtualClock.");
@@ -433,15 +586,50 @@ namespace AdofaiRenderAgent
             AudioTimelineExporter.LevelStartDsp = _levelStartDsp;
             if (_fastStartFloor > 0)
             {
-                // songposition = curDsp - dspTimeSong - addoffset - k. Natural start has songposition(at schedule) = -C
-                // with C = addoffset + k - delta (delta = lead between level start and song schedule, constant 0.896s).
-                // Re-base _levelStartDsp so that "elapsed" keeps the exact same meaning as a from-zero start.
+                // Exact analytical mirror of scrConductor.StartMusicCo when checkpointNum == 0:
+                // On floor-0 start (RDC.auto=true -> fastTakeoff=true), StartMusicCo runs on frame N:
+                //   dspTimeSong_0 = dspTime_N + buffer - adjustedCountdownTicks * crotchetAtStart / pitch - skip0
+                // and calls PlayHitTimes() on frame N. UpdateWaitingForMusicScheduled observes it on frame N+1
+                // (CurrentDsp = dspTime_N + Dt), so:
+                //   levelStartDsp_0 = dspTimeSong_0 + (Dt - buffer + countdown0 + skip0)
+                // Setting _levelStartDsp = cdc.dspTimeSong + delta0 makes songposition_minusi(elapsed)
+                // identical to a full-from-0 render to machine precision at any FPS, BPM, or pitch.
                 scrConductor cdc = scrConductor.instance;
-                double songpos = cdc.songposition_minusi;
-                double k = VirtualClock.CurrentDsp - cdc.dspTimeSong - cdc.addoffset - songpos;
-                double C = cdc.addoffset + k - 0.896;
-                _levelStartDsp = VirtualClock.CurrentDsp - (songpos + C);
-                AgentLog.Info(string.Format("Fast start re-base: songpos={0:F4} k={1:F4} C={2:F4} -> elapsed at schedule={3:F4}", songpos, k, C, songpos + C));
+                double pitch = (cdc.song != null && cdc.song.pitch > 0.001f) ? (double)cdc.song.pitch : 1.0;
+                double buf = 0.5;
+                if (_fiConductorBuffer != null)
+                {
+                    try { buf = (double)(float)_fiConductorBuffer.GetValue(cdc); } catch { }
+                }
+                double countdown0 = (double)cdc.adjustedCountdownTicks * cdc.crotchetAtStart / pitch;
+                double skip0 = 0.0;
+                try
+                {
+                    int skipMode = (int)Persistence.skipIntroBehavior;
+                    if (cdc.addoffset > 0.0 &&
+                        ((skipMode == 1 && scrController.deaths > 0) ||
+                         (skipMode == 2 && cdc.addoffset > (double)GCS.longIntroThresholdSec)))
+                    {
+                        skip0 = cdc.addoffset / pitch;
+                    }
+                }
+                catch { }
+                double delta0 = VirtualClock.Dt - buf + countdown0 + skip0;
+                _levelStartDsp = cdc.dspTimeSong + delta0;
+                // Snap VirtualClock's sub-frame phase onto the exact _levelStartDsp + k * Dt grid
+                // so every captured frame samples the exact same songposition_minusi as a full-from-0 render.
+                double rawElapsed = VirtualClock.CurrentDsp - _levelStartDsp;
+                double snappedElapsed = Math.Round(rawElapsed * (double)Config.fps) / (double)Config.fps;
+                double phaseShift = snappedElapsed - rawElapsed;
+                if (Math.Abs(phaseShift) > 1e-7)
+                {
+                    VirtualClock.ShiftPhase(phaseShift);
+                    VirtualClock.SyncConductor(cdc);
+                }
+                AgentLog.Info(string.Format(CultureInfo.InvariantCulture,
+                    "Fast start exact re-base: dspTimeSong={0:F6} buf={1:F4} dt={2:F4} countdown0={3:F4} skip0={4:F4} delta0={5:F4} phaseShift={6:+0.0000;-0.0000}s -> elapsed={7:F4}s (songpos={8:F4}s)",
+                    cdc.dspTimeSong, buf, VirtualClock.Dt, countdown0, skip0, delta0, phaseShift,
+                    VirtualClock.CurrentDsp - _levelStartDsp, cdc.songposition_minusi));
             }
             AgentLog.Info(string.Format("Music scheduled! levelStartDsp={0:F6}, dspTimeSong={1:F6}, songStartDsp={2:F6}, cal_i={3:F3}s, cal_v={4:F3}s",
                 _levelStartDsp, AudioTimelineExporter.DspTimeSong, AudioTimelineExporter.SongStartDsp,
@@ -453,8 +641,18 @@ namespace AdofaiRenderAgent
                 if (Config.startSec >= 5.0f && scrCamera.instance != null)
                 {
                     UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, true);
-                    AgentLog.Info(string.Format("Fast-seek GPU render skip enabled until {0:F2}s (3.0s full-render preroll before startSec={1:F3}s).",
-                        Config.startSec - 3.0f, Config.startSec));
+                    int seekFps = Math.Min(Config.fps, 60);
+                    if (seekFps < Config.fps)
+                    {
+                        VirtualClock.SetRate(seekFps);
+                        AgentLog.Info(string.Format("Fast-seek GPU render skip enabled until {0:F2}s (seek sim rate={1}fps -> restoring {2}fps before preroll).",
+                            Config.startSec - 3.0f, seekFps, Config.fps));
+                    }
+                    else
+                    {
+                        AgentLog.Info(string.Format("Fast-seek GPU render skip enabled until {0:F2}s (3.0s full-render preroll before startSec={1:F3}s).",
+                            Config.startSec - 3.0f, Config.startSec));
+                    }
                 }
                 else
                 {
@@ -474,6 +672,13 @@ namespace AdofaiRenderAgent
             double elapsed = VirtualClock.CurrentDsp - _levelStartDsp;
             double remaining = (double)Config.startSec - elapsed;
 
+            // Restore exact target simulation rate 3.5s before capture (0.5s before cameras wake up)
+            if (VirtualClock.TargetFps != Config.fps && remaining <= 3.5)
+            {
+                VirtualClock.SetRate(Config.fps);
+                AgentLog.Info(string.Format("Fast-seek: restored full sim rate {0}fps at elapsed={1:F3}s.", Config.fps, elapsed));
+            }
+
             // Restore full camera rendering 3.0s (180 frames at 60fps) prior to capture start
             // so all shaders, filters, trails, particles, and videoBG warm up cleanly!
             if (UiAndQualityPatches.FastSeekSkipRender && remaining <= 3.0)
@@ -486,6 +691,8 @@ namespace AdofaiRenderAgent
 
             if (elapsed + (0.5 * VirtualClock.Dt) >= (double)Config.startSec)
             {
+                if (VirtualClock.TargetFps != Config.fps)
+                    VirtualClock.SetRate(Config.fps);
                 if (UiAndQualityPatches.FastSeekSkipRender || !_fastSeekPrerollRestored)
                 {
                     UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, false);
@@ -644,7 +851,7 @@ namespace AdofaiRenderAgent
         private void ThrottleGpuDutyCycle()
         {
             if (Config == null) return;
-            if (_stage == Stage.Done || _stage == Stage.Finishing) return;
+            if (_stage == Stage.Done || _stage == Stage.Finishing || _stage == Stage.IdleWarm) return;
             _gpuPacer.PaceFrame(Config.maxGpuUsagePercent, _pipe, UiAndQualityPatches.FastSeekSkipRender);
         }
 
@@ -740,10 +947,17 @@ namespace AdofaiRenderAgent
             UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, false);
             UiAndQualityPatches.ResolutionOverrideActive = false;
             ExperimentalRenderOptimizer.ShutdownAndLogSummary();
+            if (Config != null && Config.previewMode)
+            {
+                string[] names = new string[_previewSuppressedFilters.Count];
+                _previewSuppressedFilters.CopyTo(names);
+                Array.Sort(names, StringComparer.Ordinal);
+                AgentLog.Info(string.Format("Proxy heavy-filter bypass: suppressed {0} distinct filters ({1} disables): [{2}]",
+                    names.Length, _previewSuppressedHits, string.Join(", ", names)));
+            }
             AgentLog.Info(string.Format("GpuPacer summary: nvml={0}, avg3d={1:F1}%, peak3d={2}%, peakEnc={3}% (cap={4}%)",
                 _gpuPacer.NvmlActive, _gpuPacer.Avg3dUtilObserved, _gpuPacer.Peak3dUtilObserved, _gpuPacer.PeakEncUtilObserved,
                 Config != null ? Config.maxGpuUsagePercent : 0));
-            _gpuPacer.Shutdown();
 
             if (!cancelled && ffmpegExit != 0)
             {
@@ -752,13 +966,347 @@ namespace AdofaiRenderAgent
 
             double levelElapsed = VirtualClock.CurrentDsp - _levelStartDsp;
             ReportProgress(finalStage, GetCurrentFloorIndex(), _totalFloors, levelElapsed, _estimatedTotalSec);
-            AgentLog.Info("RenderAgent exiting with stage=" + finalStage + ", ffmpegExit=" + ffmpegExit);
 
+            bool canStayWarm = (!cancelled && ffmpegExit == 0 && finalStage == "done" &&
+                Config != null && Config.keepAliveAfterFinish && !string.IsNullOrEmpty(Config.sessionDir) &&
+                scnGame.instance != null && scrController.instance != null);
+
+            if (canStayWarm)
+            {
+                EnterIdleWarm();
+                return;
+            }
+
+            AgentLog.Info("RenderAgent exiting with stage=" + finalStage + ", ffmpegExit=" + ffmpegExit);
+            ShutdownProcess(cancelled || ffmpegExit != 0 ? 1 : 0);
+        }
+
+        private void EnterIdleWarm()
+        {
+            try
+            {
+                _warmSessionDir = Config.sessionDir;
+                _warmLoadedLevelPath = Config.levelPath;
+                _warmParentPid = Config.parentPid;
+                _warmIdleTimeoutSec = (Config.idleTimeoutSec > 0) ? Config.idleTimeoutSec : 300;
+                _idleWatch = Stopwatch.StartNew();
+                _lastParentCheckSec = 0.0;
+
+                // Stop any active audio/video playback & put cameras to sleep (0% GPU idle)
+                MuteAllLocalAudio();
+                try
+                {
+                    if (scrConductor.instance != null)
+                    {
+                        if (scrConductor.instance.song != null) scrConductor.instance.song.Stop();
+                        if (scrConductor.instance.song2 != null) scrConductor.instance.song2.Stop();
+                        if (scrConductor.instance.song3 != null) scrConductor.instance.song3.Stop();
+                    }
+                    if (scnGame.instance != null && scnGame.instance.videoBG != null && scnGame.instance.videoBG.isPlaying)
+                        scnGame.instance.videoBG.Stop();
+                }
+                catch { }
+
+                UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, true);
+                Time.timeScale = 0f;
+                Application.targetFrameRate = 10;
+
+                if (!Directory.Exists(_warmSessionDir))
+                    Directory.CreateDirectory(_warmSessionDir);
+
+                string readyPath = Path.Combine(_warmSessionDir, "ready.json");
+                string tmpPath = readyPath + ".tmp";
+                string json = "{" + string.Format(CultureInfo.InvariantCulture,
+                    "\"pid\":{0},\"levelPath\":\"{1}\",\"state\":\"idle\"",
+                    Process.GetCurrentProcess().Id,
+                    AgentLog.EscapeJson(_warmLoadedLevelPath ?? "")) + "}";
+                File.WriteAllText(tmpPath, json, Encoding.UTF8);
+                if (File.Exists(readyPath)) File.Delete(readyPath);
+                File.Move(tmpPath, readyPath);
+
+                AgentLog.Info("Entering IdleWarm resident session (level & decorations kept loaded in RAM/VRAM).");
+                TransitionTo(Stage.IdleWarm);
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Warn("EnterIdleWarm failed, exiting normally: " + ex.Message);
+                ShutdownProcess(0);
+            }
+        }
+
+        private void UpdateIdleWarm()
+        {
+            MuteAllLocalAudio();
+            Application.runInBackground = true;
+
+            try
+            {
+                if (!string.IsNullOrEmpty(_warmSessionDir))
+                {
+                    if (File.Exists(Path.Combine(_warmSessionDir, "shutdown.flag")))
+                    {
+                        AgentLog.Info("IdleWarm received shutdown.flag; exiting cleanly.");
+                        ShutdownProcess(0);
+                        return;
+                    }
+
+                    string nextJobPath = Path.Combine(_warmSessionDir, "next_job.json");
+                    if (File.Exists(nextJobPath))
+                    {
+                        string json = null;
+                        try
+                        {
+                            json = File.ReadAllText(nextJobPath, Encoding.UTF8);
+                            File.Delete(nextJobPath);
+                        }
+                        catch (IOException)
+                        {
+                            // File still being replaced; retry next tick
+                            Thread.Sleep(25);
+                            return;
+                        }
+
+                        try
+                        {
+                            string readyPath = Path.Combine(_warmSessionDir, "ready.json");
+                            if (File.Exists(readyPath)) File.Delete(readyPath);
+                        }
+                        catch { }
+
+                        RenderJobConfig nextCfg = JsonUtility.FromJson<RenderJobConfig>(json);
+                        if (nextCfg == null || string.IsNullOrEmpty(nextCfg.levelPath))
+                        {
+                            AgentLog.Error("IdleWarm received invalid next_job.json; exiting.");
+                            ShutdownProcess(1);
+                            return;
+                        }
+                        BeginWarmJob(nextCfg);
+                        return;
+                    }
+                }
+
+                double idleSec = (_idleWatch != null) ? _idleWatch.Elapsed.TotalSeconds : 0.0;
+                if (idleSec > (double)_warmIdleTimeoutSec)
+                {
+                    AgentLog.Info(string.Format("IdleWarm timeout ({0}s) reached; releasing memory and exiting.", _warmIdleTimeoutSec));
+                    ShutdownProcess(0);
+                    return;
+                }
+
+                if (_warmParentPid > 0 && (idleSec - _lastParentCheckSec) >= 2.0)
+                {
+                    _lastParentCheckSec = idleSec;
+                    bool parentAlive = false;
+                    try
+                    {
+                        using (Process pp = Process.GetProcessById(_warmParentPid))
+                        {
+                            parentAlive = !pp.HasExited;
+                        }
+                    }
+                    catch { parentAlive = false; }
+
+                    if (!parentAlive)
+                    {
+                        AgentLog.Info("Parent GUI process exited; IdleWarm self-terminating.");
+                        ShutdownProcess(0);
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Warn("UpdateIdleWarm exception: " + ex.Message);
+            }
+
+            Thread.Sleep(60);
+        }
+
+        private void BeginWarmJob(RenderJobConfig newCfg)
+        {
+            try
+            {
+                Config = newCfg;
+                AgentLog.Init(newCfg.logPath, newCfg.progressPath);
+                AgentLog.Info("=== AdofaiRenderAgent Warm Session Reuse ===");
+                AgentLog.Info("Level: " + newCfg.levelPath);
+                AgentLog.Info(string.Format(CultureInfo.InvariantCulture,
+                    "Warm target: {0}x{1} @ {2}fps, previewMode={3}, trim=[{4:F2}s, {5:F2}s], endPad={6:F2}s",
+                    newCfg.width, newCfg.height, newCfg.fps, newCfg.previewMode,
+                    newCfg.startSec, newCfg.endSec, newCfg.endPaddingSec));
+
+                if (!string.Equals(Path.GetFullPath(newCfg.levelPath), Path.GetFullPath(_warmLoadedLevelPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    AgentLog.Warn("Warm session level mismatch; aborting warm pass for cold reload.");
+                    ReportProgress("warm_failed", 0, _totalFloors, 0.0, 0.0);
+                    ShutdownProcess(1);
+                    return;
+                }
+
+                // Reset all per-job runtime state cleanly
+                _isWarmReuse = true;
+                _stageFrames = 0;
+                _settledFrames = 0;
+                _pipe = null;
+                _renderWallClock = null;
+                _fastSeekPrerollRestored = false;
+                _levelStartDsp = 0.0;
+                _fastStartFloor = -1;
+                _checkpointRestartIssued = true;
+                _captureStartDsp = 0.0;
+                _wonElapsedSec = 0.0;
+                _estimatedTotalSec = 0.0;
+                _hasCapturedFirstFrame = false;
+                _wonReached = false;
+                _lastProgressFrame = -100;
+                _captureSimTick = 0;
+                _finalFrames = 0;
+                _previewSuppressedFilters.Clear();
+                _previewSuppressedHits = 0;
+
+                _gpuPacer.ResetStats();
+                AudioTimelineExporter.Init(newCfg.sfxCacheDir, newCfg.captureAudioClips);
+                PlanetTailArc.Enabled = false;
+                PlanetTailArc.Reset();
+                PlanetTailArc.Restore();
+                VirtualClock.Disengage();
+
+                Time.timeScale = 1f;
+                QualitySettings.vSyncCount = 0;
+                Application.targetFrameRate = -1;
+                Application.runInBackground = true;
+                MuteAllLocalAudio();
+                ParkUnityWindowOffscreen();
+
+                UiAndQualityPatches.UpdateConfig(newCfg);
+                UiAndQualityPatches.ForceZeroCalibrationOffsets();
+                UiAndQualityPatches.ShouldTriggerStart = false;
+                UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, false);
+                UiAndQualityPatches.ResolutionOverrideActive = true;
+
+                int warmCk = ComputeFastStartFloor();
+                if (warmCk > 0)
+                {
+                    GCS.checkpointNum = warmCk;
+                    _fastStartFloor = warmCk;
+                    AgentLog.Info(string.Format(CultureInfo.InvariantCulture,
+                        "Warm fast start official checkpoint scrub: GCS.checkpointNum={0} (target startSec={1:F2}s)",
+                        warmCk, newCfg.startSec));
+                }
+                else
+                {
+                    GCS.checkpointNum = 0;
+                    _fastStartFloor = -1;
+                }
+                try { RDC.auto = true; RDC.noHud = true; RDC.noAutoHud = true; } catch { }
+
+                try { if (scrController.instance != null) scrController.instance.StopCoroutine("WaitForStartCo"); } catch { }
+                if (_fiWaitForStartCallCount != null && scrController.instance != null)
+                    _fiWaitForStartCallCount.SetValue(scrController.instance, 0);
+                if (_fiPlayedHitSounds != null && scrConductor.instance != null)
+                    _fiPlayedHitSounds.SetValue(scrConductor.instance, false);
+
+                if (scrUIController.instance != null)
+                {
+                    try { scrUIController.instance.HideEndscreenLanterns(); } catch { }
+                }
+
+                // Ensure all floors are active before resetting scene (mirrors scrController.ResetCustomLevel)
+                scrLevelMaker lm = scrLevelMaker.instance;
+                if (lm != null && lm.listFloors != null)
+                {
+                    for (int i = 0; i < lm.listFloors.Count; i++)
+                    {
+                        scrFloor fl = lm.listFloors[i];
+                        if (fl != null && fl.gameObject != null && !fl.gameObject.activeSelf)
+                            fl.gameObject.SetActive(true);
+                    }
+                }
+
+                // Zero-reload in-memory restart: keeps decoded decorations/textures/audio/shaders in RAM/VRAM
+                // while completely resetting filters, VFX, tweens, floors, decorations, video, and conductor.
+                // Must pass remakeFloors=true to BOTH ResetScene and Play (matching PortalTravelAction / SetPracticeMode)
+                // so FinishCustomLevelLoading re-applies all floor events (trackDisappearAnimation, MoveTrack, etc.).
+                ResetCameraFilterTimeAccumulators();
+                scnGame.instance.ResetScene(true);
+                scnGame.instance.Play(warmCk > 0 ? warmCk : 0, true);
+
+                // Mirror scrController.ResetCustomLevel completion: clear transitioningLevel & re-enable player
+                // responsiveness (States.Won sets scrPlayer.responsive = false at the end of a completed pass).
+                try
+                {
+                    if (_fiTransitioningLevel != null && scrController.instance != null)
+                        _fiTransitioningLevel.SetValue(scrController.instance, false);
+                }
+                catch { }
+                try
+                {
+                    if (ADOBase.playerManager != null)
+                        ADOBase.playerManager.SetAllPlayerResponsive(true);
+                }
+                catch { }
+
+                if (scrCamera.instance != null)
+                {
+                    scrCamera.instance.forceRTCam = true;
+                    UiAndQualityPatches.EnforceCamRT(scrCamera.instance);
+                }
+                UiAndQualityPatches.ReapplyPlanetColors();
+                UiAndQualityPatches.SuppressAllOutOfLevelUI();
+
+                ReportProgress("loading_level", 0, _totalFloors, 0.0, 0.0);
+                TransitionTo(Stage.WaitingForLevelLoad);
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Error("BeginWarmJob failed (falling back to cold start): " + ex);
+                ReportProgress("warm_failed", 0, _totalFloors, 0.0, 0.0);
+                ShutdownProcess(1);
+            }
+        }
+
+        private void ResetCameraFilterTimeAccumulators()
+        {
+            try
+            {
+                Camera[] cams = Camera.allCameras;
+                if (cams == null) return;
+                for (int c = 0; c < cams.Length; c++)
+                {
+                    Camera cam = cams[c];
+                    if (cam == null) continue;
+                    _previewCamComps.Clear();
+                    cam.GetComponents<MonoBehaviour>(_previewCamComps);
+                    for (int i = 0; i < _previewCamComps.Count; i++)
+                    {
+                        MonoBehaviour mb = _previewCamComps[i];
+                        if (mb == null) continue;
+                        Type t = mb.GetType();
+                        if (!t.Name.StartsWith("CameraFilterPack", StringComparison.Ordinal)) continue;
+                        FieldInfo fi = t.GetField("TimeX", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (fi != null && fi.FieldType == typeof(float))
+                            fi.SetValue(mb, 1.0f);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ShutdownProcess(int exitCode)
+        {
             _stage = Stage.Done;
-            // All files & FFmpeg have been cleanly flushed and closed; terminate immediately
-            // so Unity/Steamworks shutdown hooks cannot hang in background.
+            try
+            {
+                if (!string.IsNullOrEmpty(_warmSessionDir))
+                {
+                    string readyPath = Path.Combine(_warmSessionDir, "ready.json");
+                    if (File.Exists(readyPath)) File.Delete(readyPath);
+                }
+            }
+            catch { }
+            try { _gpuPacer.Shutdown(); } catch { }
             try { Process.GetCurrentProcess().Kill(); } catch { }
-            try { Environment.Exit(cancelled || ffmpegExit != 0 ? 1 : 0); } catch { }
+            try { Environment.Exit(exitCode); } catch { }
         }
     }
 }

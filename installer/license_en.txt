@@ -1,9 +1,9 @@
-﻿ADOFAI PV Renderer - Terms of Use
+﻿ADOFAI PV Studio - Terms of Use
 
-Last updated: 2026-11-24
+Last updated: 2026-11-25
 
 1. Purpose
-These terms govern installation and use of ADOFAI PV Renderer (the "Software").
+These terms govern installation and use of ADOFAI PV Studio (the "Software").
 
 2. Unofficial tool
 The Software is an unofficial fan-made tool and is not affiliated with, sponsored by or endorsed by 'A Dance of Fire and Ice' or its developer. All rights to 'A Dance of Fire and Ice' belong to their respective owners.

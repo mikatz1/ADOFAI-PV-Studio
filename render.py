@@ -1,4 +1,4 @@
-"""Main entrypoint for ADOFAI Offline PV Renderer (GUI by default, CLI when arguments are provided)."""
+"""Main entrypoint for ADOFAI PV Studio (GUI by default, CLI when arguments are provided)."""
 
 from __future__ import annotations
 

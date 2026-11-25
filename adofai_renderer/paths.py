@@ -45,21 +45,31 @@ def get_data_root() -> str:
     cand = os.path.join(app_root, "cache")
     if _is_writable_dir(cand):
         return app_root
-    fallback = os.path.join(os.path.expandvars(r"%LOCALAPPDATA%"), "AdofaiPvRenderer")
+    fallback = os.path.join(os.path.expandvars(r"%LOCALAPPDATA%"), "AdofaiPvStudio")
     os.makedirs(fallback, exist_ok=True)
     return fallback
 
 
+_REG_SUBKEYS = (r"Software\ADOFAI PV Studio", r"Software\ADOFAI PV Renderer")
+
+
 def _read_installer_output_dir() -> str:
-    """MP4 export folder chosen in the installer (registry: HKCU, Software/ADOFAI PV Renderer, OutputDir)."""
+    """MP4 export folder chosen in the installer (HKCU Software\\ADOFAI PV Studio, with legacy fallback)."""
     if os.name != "nt":
         return ""
     try:
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\ADOFAI PV Renderer") as k:
-            val, _ = winreg.QueryValueEx(k, "OutputDir")
-        return str(val or "").strip()
+        for subkey in _REG_SUBKEYS:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as k:
+                    val, _ = winreg.QueryValueEx(k, "OutputDir")
+                s = str(val or "").strip()
+                if s:
+                    return s
+            except Exception:
+                continue
+        return ""
     except Exception:
         return ""
 
@@ -72,7 +82,7 @@ def get_default_output_dir() -> str:
     cand = os.path.join(app_root, "output")
     if _is_writable_dir(cand):
         return cand
-    videos = os.path.join(os.path.expanduser("~"), "Videos", "ADOFAI_PV_Renderer")
+    videos = os.path.join(os.path.expanduser("~"), "Videos", "ADOFAI_PV_Studio")
     os.makedirs(videos, exist_ok=True)
     return videos
 

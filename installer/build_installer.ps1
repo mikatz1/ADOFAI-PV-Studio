@@ -7,7 +7,7 @@ $InstDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $InstDir
 Set-Location $Root
 
-if ($RebuildExe -or -not (Test-Path "dist\ADOFAI PV Renderer.exe")) {
+if ($RebuildExe -or -not (Test-Path "dist\ADOFAI PV Studio.exe")) {
     Write-Host "[1/2] Building standalone EXE first..." -ForegroundColor Cyan
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "build_exe.ps1") -SkipShortcut
     if ($LASTEXITCODE -ne 0) { throw "EXE build failed." }
@@ -38,8 +38,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $verMatch = Select-String -Path $issPath -Pattern '#define\s+MyAppVersion\s+"([^"]+)"' | Select-Object -First 1
-$appVer = if ($verMatch) { $verMatch.Matches[0].Groups[1].Value } else { "2.0.2" }
-$outExe = Join-Path $Root "dist\installer\ADOFAI_PV_Renderer_Setup_$appVer.exe"
+$appVer = if ($verMatch) { $verMatch.Matches[0].Groups[1].Value } else { "1.0.0" }
+$outExe = Join-Path $Root "dist\installer\ADOFAI_PV_Studio_Setup_$appVer.exe"
 if (-not (Test-Path $outExe)) {
     throw "Expected installer was not created: $outExe"
 }

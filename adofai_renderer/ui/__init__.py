@@ -1,1 +1,1 @@
-"""UI components for ADOFAI Offline PV Renderer."""
+"""UI components for ADOFAI PV Studio."""

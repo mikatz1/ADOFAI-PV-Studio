@@ -22,7 +22,7 @@ def _set_windows_app_id() -> None:
     if sys.platform != "win32":
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AdofaiPvRenderer.Studio.1")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AdofaiPvStudio.App.1")
     except Exception:
         pass
 
@@ -30,7 +30,7 @@ def _set_windows_app_id() -> None:
 def launch_gui(initial_level: Optional[str] = None) -> int:
     _set_windows_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("ADOFAI PV Renderer")
+    app.setApplicationName("ADOFAI PV Studio")
     app.setStyle("Fusion")
     app.setStyleSheet(build_studio_qss())
 

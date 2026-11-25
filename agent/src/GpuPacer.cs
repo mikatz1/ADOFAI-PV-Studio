@@ -88,6 +88,23 @@ namespace AdofaiRenderAgent
             TryInitNvml();
         }
 
+        public void ResetStats()
+        {
+            _peak3dUtil = 0;
+            _peakEncUtil = 0;
+            _sum3dUtil = 0;
+            _count3dSamples = 0;
+            _emaUtil = 0.0;
+            _targetSleepMs = 0.0;
+            _sleepCarryMs = 0.0;
+            _lastAdjustTick = 0;
+            _wasFastSeek = false;
+            _burstWorkMs = 0.0;
+            _burstFrames = 0;
+            _workWatch.Restart();
+            _frameWatch.Restart();
+        }
+
         private void TryInitNvml()
         {
             try

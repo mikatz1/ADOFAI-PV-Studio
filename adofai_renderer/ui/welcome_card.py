@@ -134,21 +134,6 @@ class WelcomeCard(QWidget):
             hdr_grad.setColorAt(1.0, QColor("#FFF5FA"))
             p.fillRect(hdr_rect, hdr_grad)
 
-            # Delicate geometric diagonal accent stripes on upper-right
-            p.save()
-            p.setClipRect(hdr_rect)
-            for idx, (col_hex, x0, w) in enumerate((("#E2F1FF", r.width() - 96, 18), ("#FFE4F0", r.width() - 68, 12), ("#ECF6FF", r.width() - 46, 26))):
-                poly = QPainterPath()
-                poly.moveTo(x0, 0)
-                poly.lineTo(x0 + w, 0)
-                poly.lineTo(x0 + w - 26, 76)
-                poly.lineTo(x0 - 26, 76)
-                poly.closeSubpath()
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(col_hex))
-                p.drawPath(poly)
-            p.restore()
-
             # Top pastel blue -> pastel pink dual ribbon with subtle animated sheen
             bar_grad = QLinearGradient(0, 0, r.width(), 0)
             bar_grad.setColorAt(0.0, QColor("#5CC0FF"))
@@ -200,7 +185,7 @@ class WelcomeCard(QWidget):
 
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
-        lbl_title = QLabel("ADOFAI PV Renderer")
+        lbl_title = QLabel("ADOFAI PV Studio")
         f = QFont()
         f.setPointSize(13)
         f.setBold(True)

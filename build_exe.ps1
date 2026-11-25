@@ -28,7 +28,7 @@ $pyArgs = @(
     "--clean",
     "--onefile",
     "--windowed",
-    "--name", "ADOFAI PV Renderer",
+    "--name", "ADOFAI PV Studio",
     "--icon", $IconPath,
     "--add-data", "assets;assets",
     "--add-data", "agent\build\AdofaiRenderAgent.dll;agent\build",
@@ -59,7 +59,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-$ExePath = Join-Path $Root "dist\ADOFAI PV Renderer.exe"
+$ExePath = Join-Path $Root "dist\ADOFAI PV Studio.exe"
 if (-not (Test-Path $ExePath)) {
     throw "Expected output EXE was not created: $ExePath"
 }
@@ -71,12 +71,12 @@ if (-not $SkipShortcut) {
     Write-Host "[3/3] Creating Desktop shortcut..." -ForegroundColor Cyan
     $WshShell = New-Object -ComObject WScript.Shell
     $Desktop = [Environment]::GetFolderPath("Desktop")
-    $ShortcutPath = Join-Path $Desktop "ADOFAI PV Renderer.lnk"
+    $ShortcutPath = Join-Path $Desktop "ADOFAI PV Studio.lnk"
     $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
     $Shortcut.TargetPath = $ExePath
     $Shortcut.WorkingDirectory = (Split-Path $ExePath -Parent)
     $Shortcut.IconLocation = "$ExePath,0"
-    $Shortcut.Description = "ADOFAI Offline PV Renderer"
+    $Shortcut.Description = "ADOFAI PV Studio"
     $Shortcut.Save()
     Write-Host "      Desktop shortcut created: $ShortcutPath" -ForegroundColor Green
 } else {

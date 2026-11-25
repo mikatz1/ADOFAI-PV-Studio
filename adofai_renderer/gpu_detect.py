@@ -393,7 +393,7 @@ def build_ffmpeg_preview_args(
     output_path: str,
     encoder: str = "libx264",
 ) -> str:
-    """Build fast, seek-friendly FFmpeg args for proxy video generation (144p..720p, 5..60fps)."""
+    """Build fast, seek-friendly FFmpeg args for proxy video generation (240p..720p, 5..60fps)."""
     gop = max(2, fps)
     cq = 26 if height >= 480 else 28
     if encoder == "h264_nvenc":

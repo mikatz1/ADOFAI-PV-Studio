@@ -89,8 +89,9 @@ namespace AdofaiRenderAgent
             return s == expected;
         }
 
-        public static void ApplyPatches(Harmony harmony, RenderJobConfig cfg)
+        public static void UpdateConfig(RenderJobConfig cfg)
         {
+            if (cfg == null) return;
             TargetWidth = cfg.width;
             TargetHeight = cfg.height;
             HideCountdown = cfg.hideCountdown;
@@ -107,6 +108,38 @@ namespace AdofaiRenderAgent
                 CustomPlanetColorsEnabled,
                 RedPlanetColor.r, RedPlanetColor.g, RedPlanetColor.b, RedPlanetColor.a, RedIsPureDefault,
                 BluePlanetColor.r, BluePlanetColor.g, BluePlanetColor.b, BluePlanetColor.a, BlueIsPureDefault));
+        }
+
+        public static void ReapplyPlanetColors()
+        {
+            if (!CustomPlanetColorsEnabled) return;
+            try
+            {
+                scrController ctrl = scrController.instance;
+                if (ctrl == null || ctrl.planetarySystem == null || ctrl.planetarySystem.allPlanets == null) return;
+                var planets = ctrl.planetarySystem.allPlanets;
+                int activeCount = Math.Min(2, planets.Count);
+                for (int i = 0; i < activeCount; i++)
+                {
+                    scrPlanet p = planets[i];
+                    if (p == null || p.planetRenderer == null || !p.gameObject.activeInHierarchy) continue;
+                    // Restore sprite/glow/ring defaults before applying new color & opacity
+                    if (p.planetRenderer.sprite != null) p.planetRenderer.sprite.visible = true;
+                    if (p.planetRenderer.glow != null) p.planetRenderer.glow.enabled = true;
+                    if (p.planetRenderer.ring != null) p.planetRenderer.ring.enabled = true;
+                    p.planetRenderer.LoadPlanetColor(i == 0);
+                }
+                ctrl.planetarySystem.ApplyMultiplanetColors();
+            }
+            catch (Exception ex)
+            {
+                AgentLog.Warn("ReapplyPlanetColors warning: " + ex.Message);
+            }
+        }
+
+        public static void ApplyPatches(Harmony harmony, RenderJobConfig cfg)
+        {
+            UpdateConfig(cfg);
 
             // 1) Manage scrCamera.camRT directly (since Screen.width/height are Unity 6 native icalls)
             TryPatchGetter(harmony, typeof(scrCamera), "camRTNeedsRecreation", "CamRTNeedsRecreation_Prefix", null);

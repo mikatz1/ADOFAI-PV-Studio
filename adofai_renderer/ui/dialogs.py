@@ -442,7 +442,7 @@ class SequenceSettingsDialog(QDialog):
 
 
 class ProxySettingsDialog(QDialog):
-    """Detailed proxy resolution (144p..720p) and frame rate (5..60 fps) configuration dialog."""
+    """Detailed proxy resolution (240p..720p) and frame rate (5..60 fps) configuration dialog."""
 
     def __init__(
         self,
@@ -494,7 +494,7 @@ class ProxySettingsDialog(QDialog):
         preset_grid = QGridLayout()
         preset_grid.setSpacing(6)
         presets = [
-            (tr("proxy.preset_ultra_fast"), 256, 144, 5),
+            (tr("proxy.preset_ultra_fast"), 426, 240, 5),
             (tr("proxy.preset_std"), 480, 270, 12),
             (tr("proxy.preset_smooth"), 854, 480, 30),
             (tr("proxy.preset_hd"), 1280, 720, 60),
@@ -527,7 +527,7 @@ class ProxySettingsDialog(QDialog):
         _animate_dialog_in(self)
 
     def _select_res(self, w: int, h: int) -> None:
-        best_idx = 2
+        best_idx = 1
         best_dist = 10**9
         for i in range(self.cmb_res.count()):
             pw, ph = self.cmb_res.itemData(i)

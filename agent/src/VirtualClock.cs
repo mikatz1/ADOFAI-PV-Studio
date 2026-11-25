@@ -64,6 +64,24 @@ namespace AdofaiRenderAgent
             Time.captureDeltaTime = 0f;
         }
 
+        public static void SetRate(int newFps)
+        {
+            if (!Active) return;
+            int clamped = newFps < 1 ? 60 : newFps;
+            if (clamped == TargetFps) return;
+            StartDsp = CurrentDsp;
+            SimFrameIndex = 0;
+            TargetFps = clamped;
+            Time.captureDeltaTime = 1.0f / (float)TargetFps;
+        }
+
+        public static void ShiftPhase(double deltaDsp)
+        {
+            if (!Active) return;
+            StartDsp += deltaDsp;
+            CurrentDsp += deltaDsp;
+        }
+
         public static void StepFrameOnce()
         {
             if (!Active) return;

@@ -5,14 +5,12 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from .gpu_detect import HardwareCapabilities, detect_hardware, find_adofai_dir
 from .i18n import tr
-from .level_info import AdofaiLevelInfo, parse_adofai_info
-from .level_loader import estimate_level_duration_sec, find_adofai_in_directory
 from .paths import get_agent_dll_path, get_default_output_dir
-from .render_runner import CACHE_ROOT, PROJECT_ROOT, RenderRunner
+from .render_runner import CACHE_ROOT, RenderRunner
 
 
 @dataclass
@@ -21,7 +19,6 @@ class PreloadResult:
     adofai_dir: str = ""
     doorstop_ready: bool = False
     agent_dll: str = ""
-    sample_levels: List[Tuple[str, str, AdofaiLevelInfo, float]] = field(default_factory=list)
     warmed_mb: float = 0.0
     elapsed_sec: float = 0.0
     warnings: List[str] = field(default_factory=list)
@@ -50,7 +47,7 @@ def _warm_file_os_cache(paths: List[str], max_mb: float = 96.0) -> float:
 def run_startup_preload(
     progress_cb: Optional[Callable[[int, int, str, str, float], None]] = None,
 ) -> PreloadResult:
-    """Execute staged preloading of hardware, FFmpeg, ADOFAI engine binaries, agent DLL, and samples."""
+    """Execute staged preloading of hardware, FFmpeg, ADOFAI engine binaries, agent DLL, and workspace."""
     t0 = time.monotonic()
     total_steps = 5
     warnings: List[str] = []
@@ -102,20 +99,8 @@ def run_startup_preload(
         ])
     warmed_mb = _warm_file_os_cache(warm_targets, max_mb=96.0)
 
-    # Step 5: Pre-scan workspace sample levels & metadata
+    # Step 5: Workspace & proxy cache readiness
     emit(5, tr("preload.s5_title"), tr("preload.s5_detail"), 94.0)
-    samples: List[Tuple[str, str, AdofaiLevelInfo, float]] = []
-    sample_root = os.path.join(PROJECT_ROOT, "level")
-    if os.path.isdir(sample_root):
-        for entry in sorted(os.listdir(sample_root)):
-            d = os.path.join(sample_root, entry)
-            if not os.path.isdir(d):
-                continue
-            cands = find_adofai_in_directory(d)
-            if cands:
-                info = parse_adofai_info(cands[0])
-                dur = estimate_level_duration_sec(info, caps.ffprobe_path)
-                samples.append((entry, cands[0], info, dur))
 
     elapsed = time.monotonic() - t0
     emit(5, tr("preload.done_title"), tr("preload.done_detail", elapsed=elapsed, mb=warmed_mb), 100.0)
@@ -125,7 +110,6 @@ def run_startup_preload(
         adofai_dir=adofai_dir,
         doorstop_ready=doorstop_ready,
         agent_dll=agent_dll,
-        sample_levels=samples,
         warmed_mb=warmed_mb,
         elapsed_sec=elapsed,
         warnings=warnings,
