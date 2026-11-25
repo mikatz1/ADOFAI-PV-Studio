@@ -226,7 +226,7 @@ namespace AdofaiRenderAgent
                     UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, true);
                 }
                 if (Config != null && Config.previewMode)
-                    DisableHeavyFiltersForPreview();
+                    ApplyPreviewRenderMode();
                 if (_stage == Stage.Capturing && PlanetTailArc.Enabled)
                 {
                     try { PlanetTailArc.Tick(VirtualClock.Dt); }
@@ -237,8 +237,28 @@ namespace AdofaiRenderAgent
 
         private readonly List<MonoBehaviour> _previewCamComps = new List<MonoBehaviour>(64);
         private readonly Dictionary<Type, bool> _heavyFilterTypeCache = new Dictionary<Type, bool>(32);
+        private readonly Dictionary<Type, bool> _anyFilterTypeCache = new Dictionary<Type, bool>(64);
         private readonly HashSet<string> _previewSuppressedFilters = new HashSet<string>(StringComparer.Ordinal);
         private int _previewSuppressedHits = 0;
+
+        // Chart-only proxy mode state (restored cleanly before IdleWarm / Warm reuse so final renders stay 100% intact)
+        private readonly List<GameObject> _chartOnlyDeactivatedObjs = new List<GameObject>(1024);
+        private readonly HashSet<int> _chartOnlyDeactivatedIds = new HashSet<int>();
+        private readonly List<Renderer> _chartOnlyDisabledRenderers = new List<Renderer>(16);
+        private readonly HashSet<int> _chartOnlyDisabledRendererIds = new HashSet<int>();
+        private bool _chartOnlyVideoSuppressed = false;
+        private float _chartOnlyVideoOrigAlpha = 1f;
+        private int _chartOnlyDecosHiddenCount = 0;
+
+        private string GetNormalizedPreviewRenderMode()
+        {
+            string raw = (Config != null && !string.IsNullOrEmpty(Config.previewRenderMode))
+                ? Config.previewRenderMode.Trim().ToLowerInvariant()
+                : "no_heavy_filters";
+            if (raw == "chart_only" || raw == "all" || raw == "no_heavy_filters")
+                return raw;
+            return "no_heavy_filters";
+        }
 
         private static bool IsHeavyProxyFilterName(string typeName)
         {
@@ -274,6 +294,22 @@ namespace AdofaiRenderAgent
             return false;
         }
 
+        private static bool IsAnyPostFxFilterName(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName)) return false;
+            if (IsHeavyProxyFilterName(typeName)) return true;
+            if (typeName.StartsWith("CameraFilterPack", StringComparison.Ordinal)) return true;
+            if (typeName.IndexOf("HallOfMirrors", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("Bloom", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("MotionBlur", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("Vignette", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("ColorCorrection", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("ScreenOverlay", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("Fisheye", StringComparison.Ordinal) >= 0) return true;
+            if (typeName.IndexOf("Twirl", StringComparison.Ordinal) >= 0 && typeName != "ffxTwirl") return true;
+            return false;
+        }
+
         private bool IsHeavyProxyFilter(Type t)
         {
             bool res;
@@ -283,7 +319,176 @@ namespace AdofaiRenderAgent
             return res;
         }
 
-        // Proxy mode only: suppress the heaviest multi-pass / high-tap post-FX filters
+        private bool IsAnyPostFxFilter(Type t)
+        {
+            bool res;
+            if (_anyFilterTypeCache.TryGetValue(t, out res)) return res;
+            res = IsAnyPostFxFilterName(t.Name);
+            _anyFilterTypeCache[t] = res;
+            return res;
+        }
+
+        private void ApplyPreviewRenderMode()
+        {
+            string mode = GetNormalizedPreviewRenderMode();
+            if (mode == "all")
+                return;
+            if (mode == "chart_only")
+            {
+                ApplyChartOnlyForPreview();
+                return;
+            }
+            DisableHeavyFiltersForPreview();
+        }
+
+        private void SuppressGameObjectForChartOnly(GameObject go)
+        {
+            if (go == null || !go.activeSelf) return;
+            int id = go.GetInstanceID();
+            go.SetActive(false);
+            if (_chartOnlyDeactivatedIds.Add(id))
+                _chartOnlyDeactivatedObjs.Add(go);
+        }
+
+        private void SuppressRendererForChartOnly(Renderer r)
+        {
+            if (r == null || !r.enabled) return;
+            int id = r.GetInstanceID();
+            r.enabled = false;
+            if (_chartOnlyDisabledRendererIds.Add(id))
+                _chartOnlyDisabledRenderers.Add(r);
+        }
+
+        // Chart-only proxy mode: render only the tile track, planets, and camera motion.
+        // Hides decorations, custom/video backgrounds, flashes, and all camera post-FX filters
+        // while keeping assets resident in memory so warm-session final renders restore 100%.
+        private void ApplyChartOnlyForPreview()
+        {
+            try
+            {
+                // 1) Disable all registered ADOFAI VFX filters (scrVfxPlus.filterToComp)
+                if (scrVfxPlus.instance != null && scrVfxPlus.instance.filterToComp != null)
+                {
+                    foreach (var kv in scrVfxPlus.instance.filterToComp)
+                    {
+                        MonoBehaviour mb = kv.Value;
+                        if (mb != null && mb.enabled)
+                        {
+                            mb.enabled = false;
+                            _previewSuppressedHits++;
+                            _previewSuppressedFilters.Add(mb.GetType().Name);
+                        }
+                    }
+                }
+
+                // 2) Disable all post-FX components across all cameras (Bloom, MotionBlur, CameraFilterPack*, HallOfMirrors, etc.)
+                Camera[] cams = Camera.allCameras;
+                if (cams != null)
+                {
+                    for (int c = 0; c < cams.Length; c++)
+                    {
+                        Camera cam = cams[c];
+                        if (cam == null) continue;
+                        _previewCamComps.Clear();
+                        cam.GetComponents<MonoBehaviour>(_previewCamComps);
+                        for (int i = 0; i < _previewCamComps.Count; i++)
+                        {
+                            MonoBehaviour mb = _previewCamComps[i];
+                            if (mb == null || !mb.enabled) continue;
+                            Type t = mb.GetType();
+                            if (IsAnyPostFxFilter(t))
+                            {
+                                mb.enabled = false;
+                                _previewSuppressedHits++;
+                                _previewSuppressedFilters.Add(t.Name);
+                            }
+                        }
+                    }
+                }
+
+                // 3) Hide all decorations (GameObject deactivation skips both CPU Update/LateUpdate and GPU draw)
+                scrDecorationManager dm = scrDecorationManager.instance;
+                if (dm != null && dm.allDecorations != null)
+                {
+                    var decos = dm.allDecorations;
+                    int n = decos.Count;
+                    for (int i = 0; i < n; i++)
+                    {
+                        scrDecoration d = decos[i];
+                        if (d == null) continue;
+                        GameObject go = d.gameObject;
+                        if (go != null && go.activeSelf)
+                        {
+                            SuppressGameObjectForChartOnly(go);
+                            _chartOnlyDecosHiddenCount++;
+                        }
+                    }
+                }
+
+                // 4) Hide custom background sprite & video background
+                if (scnGame.instance != null)
+                {
+                    if (scnGame.instance.custBG != null && scnGame.instance.custBG.gameObject != null)
+                        SuppressGameObjectForChartOnly(scnGame.instance.custBG.gameObject);
+
+                    VideoPlayer vp = scnGame.instance.videoBG;
+                    if (vp != null)
+                    {
+                        if (!_chartOnlyVideoSuppressed)
+                        {
+                            _chartOnlyVideoOrigAlpha = vp.targetCameraAlpha;
+                            _chartOnlyVideoSuppressed = true;
+                        }
+                        if (vp.targetCameraAlpha > 0f) vp.targetCameraAlpha = 0f;
+                        if (vp.isPlaying) vp.Pause();
+                    }
+                }
+
+                // 5) Hide background/foreground flash overlays so chart tiles stay completely legible
+                if (scrCamera.instance != null)
+                {
+                    SuppressRendererForChartOnly(scrCamera.instance.flashPlusRendererBg);
+                    SuppressRendererForChartOnly(scrCamera.instance.flashPlusRendererFg);
+                }
+            }
+            catch { }
+        }
+
+        private void RestoreChartOnlyHiddenObjects()
+        {
+            try
+            {
+                for (int i = 0; i < _chartOnlyDeactivatedObjs.Count; i++)
+                {
+                    GameObject go = _chartOnlyDeactivatedObjs[i];
+                    if (go != null && !go.activeSelf)
+                        go.SetActive(true);
+                }
+                _chartOnlyDeactivatedObjs.Clear();
+                _chartOnlyDeactivatedIds.Clear();
+
+                for (int i = 0; i < _chartOnlyDisabledRenderers.Count; i++)
+                {
+                    Renderer r = _chartOnlyDisabledRenderers[i];
+                    if (r != null && !r.enabled)
+                        r.enabled = true;
+                }
+                _chartOnlyDisabledRenderers.Clear();
+                _chartOnlyDisabledRendererIds.Clear();
+
+                if (_chartOnlyVideoSuppressed)
+                {
+                    _chartOnlyVideoSuppressed = false;
+                    if (scnGame.instance != null && scnGame.instance.videoBG != null)
+                    {
+                        try { scnGame.instance.videoBG.targetCameraAlpha = _chartOnlyVideoOrigAlpha; } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Proxy mode ("no_heavy_filters"): suppress the heaviest multi-pass / high-tap post-FX filters
         // (Bloom, Gaussian/Radial/Focus Blur, Glow, OilPaint, MotionBlur, Rain/Snow/Blizzard/WaterDrop)
         // across both CameraFilterPack_* and CameraFilterPackLegacy_* families so proxy generation
         // stays fast without ever affecting final renders.
@@ -859,6 +1064,7 @@ namespace AdofaiRenderAgent
         {
             try
             {
+                if (Config != null && Config.previewMode && GetNormalizedPreviewRenderMode() == "chart_only") return;
                 if (scnGame.instance == null || scrConductor.instance == null) return;
                 VideoPlayer vp = scnGame.instance.videoBG;
                 if (vp == null || !vp.isPrepared || !VirtualClock.Active) return;
@@ -946,14 +1152,16 @@ namespace AdofaiRenderAgent
             VirtualClock.Disengage();
             UiAndQualityPatches.SetFastSeekCameraSkip(scrCamera.instance, false);
             UiAndQualityPatches.ResolutionOverrideActive = false;
+            RestoreChartOnlyHiddenObjects();
             ExperimentalRenderOptimizer.ShutdownAndLogSummary();
             if (Config != null && Config.previewMode)
             {
+                string pMode = GetNormalizedPreviewRenderMode();
                 string[] names = new string[_previewSuppressedFilters.Count];
                 _previewSuppressedFilters.CopyTo(names);
                 Array.Sort(names, StringComparer.Ordinal);
-                AgentLog.Info(string.Format("Proxy heavy-filter bypass: suppressed {0} distinct filters ({1} disables): [{2}]",
-                    names.Length, _previewSuppressedHits, string.Join(", ", names)));
+                AgentLog.Info(string.Format("Proxy render mode={0}: suppressed {1} distinct filters ({2} disables, hiddenDecos={3}): [{4}]",
+                    pMode, names.Length, _previewSuppressedHits, _chartOnlyDecosHiddenCount, string.Join(", ", names)));
             }
             AgentLog.Info(string.Format("GpuPacer summary: nvml={0}, avg3d={1:F1}%, peak3d={2}%, peakEnc={3}% (cap={4}%)",
                 _gpuPacer.NvmlActive, _gpuPacer.Avg3dUtilObserved, _gpuPacer.Peak3dUtilObserved, _gpuPacer.PeakEncUtilObserved,
@@ -1163,6 +1371,8 @@ namespace AdofaiRenderAgent
                 _finalFrames = 0;
                 _previewSuppressedFilters.Clear();
                 _previewSuppressedHits = 0;
+                _chartOnlyDecosHiddenCount = 0;
+                RestoreChartOnlyHiddenObjects();
 
                 _gpuPacer.ResetStats();
                 AudioTimelineExporter.Init(newCfg.sfxCacheDir, newCfg.captureAudioClips);

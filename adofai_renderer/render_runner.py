@@ -44,6 +44,15 @@ PROXY_RES_PRESETS: List[Tuple[str, int, int]] = [
 DEFAULT_PROXY_WIDTH = 480
 DEFAULT_PROXY_HEIGHT = 270
 DEFAULT_PROXY_FPS = 12
+PROXY_RENDER_MODES: Tuple[str, ...] = ("chart_only", "no_heavy_filters", "all")
+DEFAULT_PROXY_MODE = "no_heavy_filters"
+
+
+def normalize_proxy_mode(mode: Optional[str]) -> str:
+    m = str(mode or "").strip().lower()
+    if m in PROXY_RENDER_MODES:
+        return m
+    return DEFAULT_PROXY_MODE
 
 
 def clamp_proxy_spec(width: int, height: int, fps: int) -> Tuple[int, int, int]:
@@ -66,15 +75,27 @@ def load_proxy_settings() -> dict:
                 data.get("height", DEFAULT_PROXY_HEIGHT),
                 data.get("fps", DEFAULT_PROXY_FPS),
             )
-            return {"width": w, "height": h, "fps": fps}
+            mode = normalize_proxy_mode(data.get("mode", DEFAULT_PROXY_MODE))
+            return {"width": w, "height": h, "fps": fps, "mode": mode}
     except Exception:
         pass
-    return {"width": DEFAULT_PROXY_WIDTH, "height": DEFAULT_PROXY_HEIGHT, "fps": DEFAULT_PROXY_FPS}
+    return {
+        "width": DEFAULT_PROXY_WIDTH,
+        "height": DEFAULT_PROXY_HEIGHT,
+        "fps": DEFAULT_PROXY_FPS,
+        "mode": DEFAULT_PROXY_MODE,
+    }
 
 
-def save_proxy_settings(width: int, height: int, fps: int) -> dict:
+def save_proxy_settings(
+    width: int,
+    height: int,
+    fps: int,
+    mode: str = DEFAULT_PROXY_MODE,
+) -> dict:
     w, h, f = clamp_proxy_spec(width, height, fps)
-    state = {"width": w, "height": h, "fps": f}
+    m = normalize_proxy_mode(mode)
+    state = {"width": w, "height": h, "fps": f, "mode": m}
     try:
         os.makedirs(CACHE_ROOT, exist_ok=True)
         with open(PROXY_SETTINGS_PATH, "w", encoding="utf-8") as fp:
@@ -93,14 +114,16 @@ def compute_preview_cache_key(
     proxy_width: int = DEFAULT_PROXY_WIDTH,
     proxy_height: int = DEFAULT_PROXY_HEIGHT,
     proxy_fps: int = DEFAULT_PROXY_FPS,
+    proxy_mode: str = DEFAULT_PROXY_MODE,
 ) -> str:
     abs_lvl = os.path.abspath(level_path)
     st = os.stat(abs_lvl)
     pw, ph, pf = clamp_proxy_spec(proxy_width, proxy_height, proxy_fps)
+    pm = normalize_proxy_mode(proxy_mode)
     key_src = (
         f"{abs_lvl}|{st.st_size}|{int(st.st_mtime)}|"
         f"{red_color}|{red_opacity:.2f}|{blue_color}|{blue_opacity:.2f}|"
-        f"{pw}x{ph}@{pf}|v7"
+        f"{pw}x{ph}@{pf}|{pm}|v8"
     )
     return hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:14]
 
@@ -1340,6 +1363,7 @@ class RenderRunner:
         proxy_width: int = DEFAULT_PROXY_WIDTH,
         proxy_height: int = DEFAULT_PROXY_HEIGHT,
         proxy_fps: int = DEFAULT_PROXY_FPS,
+        proxy_mode: str = DEFAULT_PROXY_MODE,
     ) -> PreviewResult:
         """Pre-render a lightweight proxy MP4 + timeline filmstrip for trim selection (240p..720p, 5..60fps)."""
         if self._cancel_event.is_set():
@@ -1349,9 +1373,10 @@ class RenderRunner:
             return PreviewResult(success=False, error="레벨 파일을 찾을 수 없습니다.")
 
         pw, ph, out_fps = clamp_proxy_spec(proxy_width, proxy_height, proxy_fps)
+        pmode = normalize_proxy_mode(proxy_mode)
         os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
         h = compute_preview_cache_key(
-            abs_lvl, red_color, red_opacity, blue_color, blue_opacity, pw, ph, out_fps
+            abs_lvl, red_color, red_opacity, blue_color, blue_opacity, pw, ph, out_fps, pmode
         )
         out_mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip_jpg = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")
@@ -1417,8 +1442,9 @@ class RenderRunner:
                 "bluePlanetColor": blue_color,
                 "bluePlanetOpacity": float(max(0.0, min(1.0, blue_opacity))),
                 "lowSpecSafeMode": bool(self.caps.low_spec_recommended),
-                "experimentalOptimizeRender": True,
+                "experimentalOptimizeRender": (pmode != "chart_only"),
                 "previewMode": True,
+                "previewRenderMode": pmode,
                 "captureStride": stride,
             }
 
@@ -1551,7 +1577,7 @@ class RenderRunner:
                 try:
                     with open(log_path, "r", encoding="utf-8-sig", errors="replace") as lf:
                         for line in lf:
-                            if "Proxy heavy-filter bypass:" in line:
+                            if "Proxy render mode=" in line or "Proxy heavy-filter bypass:" in line:
                                 log_cb(line.strip())
                                 break
                 except Exception:

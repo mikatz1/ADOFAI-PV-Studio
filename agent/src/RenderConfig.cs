@@ -44,6 +44,7 @@ namespace AdofaiRenderAgent
         public bool lowSpecSafeMode = false;
         public bool experimentalOptimizeRender = false;
         public bool previewMode = false;
+        public string previewRenderMode = "no_heavy_filters"; // "chart_only", "no_heavy_filters", "all"
         public int startFloor = -1; // >0: start the level from this floor via the game's own checkpoint (play-from-here) path instead of simulating from 0
         public bool fastStart = true; // jump to a checkpoint floor shortly before startSec via official ResetScene+Play(ck, true) scrub
         public bool arcTails = true; // re-emit planet tail particles along the true orbit arc between ticks

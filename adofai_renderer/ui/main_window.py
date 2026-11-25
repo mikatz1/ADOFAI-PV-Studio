@@ -53,6 +53,7 @@ from ..preloader import PreloadResult
 from ..render_runner import (
     DEFAULT_PROXY_FPS,
     DEFAULT_PROXY_HEIGHT,
+    DEFAULT_PROXY_MODE,
     DEFAULT_PROXY_WIDTH,
     PREVIEW_CACHE_DIR,
     PROJECT_ROOT,
@@ -66,6 +67,7 @@ from ..render_runner import (
     estimate_render_time_sec,
     get_warm_session_manager,
     load_proxy_settings,
+    normalize_proxy_mode,
     save_proxy_settings,
 )
 from .dialogs import (
@@ -215,6 +217,7 @@ class PreviewBuildWorker(QThread):
         proxy_width: int = DEFAULT_PROXY_WIDTH,
         proxy_height: int = DEFAULT_PROXY_HEIGHT,
         proxy_fps: int = DEFAULT_PROXY_FPS,
+        proxy_mode: str = DEFAULT_PROXY_MODE,
     ) -> None:
         super().__init__()
         self.gen_id = int(gen_id)
@@ -230,6 +233,7 @@ class PreviewBuildWorker(QThread):
         self.proxy_width = proxy_width
         self.proxy_height = proxy_height
         self.proxy_fps = proxy_fps
+        self.proxy_mode = normalize_proxy_mode(proxy_mode)
 
     def run(self) -> None:
         res = self.runner.generate_rough_preview(
@@ -245,6 +249,7 @@ class PreviewBuildWorker(QThread):
             proxy_width=self.proxy_width,
             proxy_height=self.proxy_height,
             proxy_fps=self.proxy_fps,
+            proxy_mode=self.proxy_mode,
         )
         self.done.emit(self.gen_id, res)
 
@@ -1698,16 +1703,26 @@ class MainWindow(QMainWindow):
                 self._audio_player.setSource(QUrl.fromLocalFile(self.level_info.song_path))
                 self._start_waveform_worker(self.level_info.song_path)
 
+    def _proxy_mode_short_label(self) -> str:
+        mode = normalize_proxy_mode(self.proxy_state.get("mode", DEFAULT_PROXY_MODE))
+        key_map = {
+            "chart_only": "proxy.short_chart_only",
+            "no_heavy_filters": "proxy.short_no_heavy",
+            "all": "proxy.short_all",
+        }
+        return tr(key_map.get(mode, "proxy.short_no_heavy"))
+
     def _update_vp_mode_label(self) -> None:
         pw = self.proxy_state["width"]
         ph = self.proxy_state["height"]
         pf = self.proxy_state["fps"]
+        mlbl = self._proxy_mode_short_label()
         if not self.level_path:
             self.lbl_vp_mode.setText(tr("vp.mode_fit"))
         elif self.viewport.has_video():
-            self.lbl_vp_mode.setText(tr("vp.mode_proxy", w=pw, h=ph, fps=pf))
+            self.lbl_vp_mode.setText(tr("vp.mode_proxy", w=pw, h=ph, fps=pf, mode=mlbl))
         else:
-            self.lbl_vp_mode.setText(tr("vp.mode_none_spec", h=ph, fps=pf))
+            self.lbl_vp_mode.setText(tr("vp.mode_none_spec", h=ph, fps=pf, mode=mlbl))
 
     def _start_waveform_worker(self, audio_src: str) -> None:
         if not audio_src or not os.path.isfile(audio_src):
@@ -1736,6 +1751,7 @@ class MainWindow(QMainWindow):
             self.proxy_state["width"],
             self.proxy_state["height"],
             self.proxy_state["fps"],
+            self.proxy_state.get("mode", DEFAULT_PROXY_MODE),
         )
         mp4 = os.path.join(PREVIEW_CACHE_DIR, f"preview_{h}.mp4")
         strip = os.path.join(PREVIEW_CACHE_DIR, f"strip_{h}.jpg")
@@ -1875,16 +1891,18 @@ class MainWindow(QMainWindow):
             width=self.proxy_state["width"],
             height=self.proxy_state["height"],
             fps=self.proxy_state["fps"],
+            mode=self.proxy_state.get("mode", DEFAULT_PROXY_MODE),
             parent=self,
         )
         if dlg.exec() == dlg.DialogCode.Accepted:
-            pw, ph, pf = dlg.result_spec()
+            pw, ph, pf, pmode = dlg.result_spec()
             changed = (
                 pw != self.proxy_state["width"]
                 or ph != self.proxy_state["height"]
                 or pf != self.proxy_state["fps"]
+                or pmode != normalize_proxy_mode(self.proxy_state.get("mode", DEFAULT_PROXY_MODE))
             )
-            self.proxy_state = save_proxy_settings(pw, ph, pf)
+            self.proxy_state = save_proxy_settings(pw, ph, pf, pmode)
             if changed and self.level_path:
                 if self._is_preview_busy():
                     self._cancel_active_preview(next_action="restart")
@@ -1937,6 +1955,7 @@ class MainWindow(QMainWindow):
             proxy_width=self.proxy_state["width"],
             proxy_height=self.proxy_state["height"],
             proxy_fps=self.proxy_state["fps"],
+            proxy_mode=self.proxy_state.get("mode", DEFAULT_PROXY_MODE),
         )
         self._preview_worker = worker
         self._live_preview_workers.append(worker)

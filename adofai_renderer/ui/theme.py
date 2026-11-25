@@ -800,6 +800,29 @@ QCheckBox::indicator:checked {{
     border-color: #568ec7;
     image: url("{chk_url}");
 }}
+QRadioButton {{
+    spacing: 8px;
+    color: #e4e4e4;
+    font-size: 12px;
+    background: transparent;
+}}
+QRadioButton::indicator {{
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid #5a5a5a;
+    border-radius: 7px;
+    background: {p.bg_input};
+}}
+QRadioButton::indicator:hover {{
+    border-color: #7eaee0;
+}}
+QRadioButton::indicator:checked {{
+    width: 6px;
+    height: 6px;
+    border: 4px solid {p.accent_primary};
+    border-radius: 7px;
+    background: #ffffff;
+}}
 QTabWidget::pane {{
     border: 1px solid {p.border_subtle};
     background-color: {p.bg_panel};
@@ -1230,6 +1253,30 @@ QCheckBox::indicator:checked {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #62C0FF, stop:1 #3A9AF8);
     border-color: #3491EE;
     image: url("{chk_url}");
+}}
+QRadioButton {{
+    spacing: 8px;
+    color: #243754;
+    font-size: 12px;
+    background: transparent;
+}}
+QRadioButton::indicator {{
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid #A9C4E4;
+    border-radius: 7px;
+    background: #FFFFFF;
+}}
+QRadioButton::indicator:hover {{
+    border-color: #4EA7FF;
+    background: #F4FAFF;
+}}
+QRadioButton::indicator:checked {{
+    width: 6px;
+    height: 6px;
+    border: 4px solid #3A9AF8;
+    border-radius: 7px;
+    background: #FFFFFF;
 }}
 QTabWidget::pane {{
     border: 1px solid #C8DCF2;

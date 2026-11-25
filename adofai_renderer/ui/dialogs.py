@@ -10,6 +10,7 @@ from typing import Optional
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QSlider,
     QSpinBox,
     QTabWidget,
@@ -35,11 +37,13 @@ from ..level_info import AdofaiLevelInfo
 from ..render_runner import (
     DEFAULT_PROXY_FPS,
     DEFAULT_PROXY_HEIGHT,
+    DEFAULT_PROXY_MODE,
     DEFAULT_PROXY_WIDTH,
     PROXY_RES_PRESETS,
     RenderSettings,
     clamp_proxy_spec,
     estimate_render_time_sec,
+    normalize_proxy_mode,
 )
 from .theme import (
     format_duration_korean,
@@ -442,19 +446,22 @@ class SequenceSettingsDialog(QDialog):
 
 
 class ProxySettingsDialog(QDialog):
-    """Detailed proxy resolution (240p..720p) and frame rate (5..60 fps) configuration dialog."""
+    """Detailed proxy resolution (240p..720p), frame rate (5..60 fps), and 3-tier render scope dialog."""
 
     def __init__(
         self,
         width: int = DEFAULT_PROXY_WIDTH,
         height: int = DEFAULT_PROXY_HEIGHT,
         fps: int = DEFAULT_PROXY_FPS,
+        mode: str = DEFAULT_PROXY_MODE,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("proxy.title"))
-        self.setFixedWidth(440)
+        self.setFixedWidth(468)
         w, h, f = clamp_proxy_spec(width, height, fps)
+        cur_mode = normalize_proxy_mode(mode)
+        pal = get_palette()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 14)
@@ -486,6 +493,41 @@ class ProxySettingsDialog(QDialog):
 
         root.addLayout(g)
 
+        # 3-tier Proxy Render Scope
+        mode_lbl = QLabel(tr("proxy.mode"))
+        mode_lbl.setObjectName("muted")
+        root.addWidget(mode_lbl)
+
+        mode_card = QFrame()
+        mode_card.setObjectName("panel")
+        mode_lay = QVBoxLayout(mode_card)
+        mode_lay.setContentsMargins(12, 10, 12, 10)
+        mode_lay.setSpacing(8)
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_radios: dict[str, QRadioButton] = {}
+        mode_specs = [
+            ("chart_only", tr("proxy.mode_chart_only"), tr("proxy.mode_chart_only_desc")),
+            ("no_heavy_filters", tr("proxy.mode_no_heavy"), tr("proxy.mode_no_heavy_desc")),
+            ("all", tr("proxy.mode_all"), tr("proxy.mode_all_desc")),
+        ]
+        for key, title, desc in mode_specs:
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            rb = QRadioButton(title)
+            rb.setStyleSheet(f"color: {pal.text_primary}; font-weight: 600; background: transparent;")
+            rb.setChecked(key == cur_mode)
+            self._mode_group.addButton(rb)
+            self._mode_radios[key] = rb
+            d_lbl = QLabel(desc)
+            d_lbl.setWordWrap(True)
+            d_lbl.setStyleSheet(f"color: {pal.text_secondary}; font-size: 11px; padding-left: 20px; background: transparent;")
+            box.addWidget(rb)
+            box.addWidget(d_lbl)
+            mode_lay.addLayout(box)
+
+        root.addWidget(mode_card)
+
         # Quick preset chips
         q_lbl = QLabel(tr("proxy.quick"))
         q_lbl.setObjectName("muted")
@@ -513,7 +555,9 @@ class ProxySettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_def = QPushButton(tr("btn.restore_defaults"))
-        btn_def.clicked.connect(lambda: self._apply_preset(DEFAULT_PROXY_WIDTH, DEFAULT_PROXY_HEIGHT, DEFAULT_PROXY_FPS))
+        btn_def.clicked.connect(
+            lambda: self._apply_preset(DEFAULT_PROXY_WIDTH, DEFAULT_PROXY_HEIGHT, DEFAULT_PROXY_FPS, DEFAULT_PROXY_MODE)
+        )
         btn_cancel = QPushButton(tr("btn.cancel"))
         btn_cancel.clicked.connect(self.reject)
         btn_ok = QPushButton(tr("btn.apply"))
@@ -537,13 +581,25 @@ class ProxySettingsDialog(QDialog):
                 best_idx = i
         self.cmb_res.setCurrentIndex(best_idx)
 
-    def _apply_preset(self, w: int, h: int, fps: int) -> None:
+    def _apply_preset(self, w: int, h: int, fps: int, mode: Optional[str] = None) -> None:
         self._select_res(w, h)
         self.spn_fps.setValue(fps)
+        if mode is not None:
+            norm = normalize_proxy_mode(mode)
+            rb = self._mode_radios.get(norm)
+            if rb is not None:
+                rb.setChecked(True)
 
-    def result_spec(self) -> tuple[int, int, int]:
+    def selected_mode(self) -> str:
+        for key, rb in self._mode_radios.items():
+            if rb.isChecked():
+                return key
+        return DEFAULT_PROXY_MODE
+
+    def result_spec(self) -> tuple[int, int, int, str]:
         pw, ph = self.cmb_res.currentData()
-        return clamp_proxy_spec(pw, ph, self.spn_fps.value())
+        w, h, f = clamp_proxy_spec(pw, ph, self.spn_fps.value())
+        return w, h, f, self.selected_mode()
 
 
 class ExportSettingsDialog(QDialog):
